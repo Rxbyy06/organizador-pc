@@ -1,0 +1,7 @@
+customtkinter==6.0.0
+pillow==13.0.0
+pymupdf==1.28.2
+pystray==0.19.5
+pywin32==312
+Send2Trash==2.1.0
+watchdog==6.0.0

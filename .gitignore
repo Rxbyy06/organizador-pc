@@ -1,0 +1,12 @@
+# Se regenera con: python -m venv .venv  +  .venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv/
+# Datos del programa: van en la copia semanal de OneDrive (llevan nombres de todos tus archivos)
+datos/
+# Carpeta de pruebas: se regenera con  python tests/crear_sandbox.py pruebas
+pruebas/
+__pycache__/
+# Configuración y reglas de cada usuario (se crean desde los *.example)
+config.toml
+aprendido.txt
+*.pyc
+*.tmp

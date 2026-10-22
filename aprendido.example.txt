@@ -1,0 +1,15 @@
+# Lo que el Organizador ha aprendido. Puedes editarlo con el Bloc de notas;
+# los cambios se notan en la siguiente descarga, sin reiniciar nada.
+#
+# Cada línea es:  <tipo> <clave> = <carpeta dentro de OneDrive>
+#   curso N       id de un curso de Aula Global → su asignatura
+#   contexto N    un recurso o sección concreta de Aula Global
+#   actividad N   una actividad de Aula Global (carpeta, tarea…)
+#   web dominio   descargas de esa web
+#
+# Para que olvide algo, borra la línea. Las líneas con # delante no cuentan.
+
+# Ejemplos (el programa añade sus propias reglas al aceptar descargas).
+curso 12345 = 1 - Universidad UPF\1r - T1 - Programació
+web dictionary.cambridge.org = 3 - Idiomas\Inglés
+web www.renfe.com = 4 - Personal\Viajes

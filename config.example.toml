@@ -1,0 +1,106 @@
+# Configuración del Organizador del PC.
+# Copia este archivo como config.toml y cambia <usuario> y las carpetas por las tuyas.
+# Puedes editarla con el Bloc de notas. Los cambios se aplican al reiniciar el programa
+# (icono junto al reloj → Salir, y volver a abrir «Organizador del PC»).
+# Las rutas van entre comillas simples.
+
+[rutas]
+descargas = 'C:\Users\<usuario>\Downloads'
+onedrive = 'C:\Users\<usuario>\OneDrive'
+# Carpeta de la universidad, dentro de OneDrive.
+universidad = '1 - Universidad UPF'
+
+[organizador]
+# true = no mueve nada: solo anota en el historial lo que haría.
+simulacion = false
+# Lo que hay en Descargas y no se toca nunca.
+ignorar = ['desktop.ini']
+# Segundos que el tamaño de una descarga debe estar quieto para darla por terminada.
+segundos_estable = 3
+# Webs que sirven para todo: de ellas no se aprende ninguna carpeta.
+webs_genericas = [
+    'docs.google.com', 'drive.google.com', 'drive.usercontent.google.com',
+    'mail.google.com', 'www.google.com', 'web.whatsapp.com', 'www.ilovepdf.com',
+    'outlook.live.com', 'onedrive.live.com', 'github.com', 'codeload.github.com',
+]
+
+[indice]
+# Carpetas de OneDrive donde se buscan duplicados (las principales).
+carpetas = [
+    '1 - Universidad UPF', '2 - Trabajo', '3 - Idiomas', '4 - Personal',
+]
+# Solo se lee el texto de los PDF de estas carpetas (para acertar mejor la asignatura).
+leer_texto_en = ['1 - Universidad UPF']
+# Aquí solo se calcula la huella: nunca se lee el contenido ni se usa el nombre.
+solo_huella = ['4 - Personal\Diario']
+# Nunca se tocan.
+excluir = ['Documentos\Partidas guardadas']
+# Minutos sin tocar ratón ni teclado antes de hacer el trabajo pesado.
+minutos_inactivo = 5
+
+[limpieza]
+# Días que puede estar algo en Descargas (desde que llega) antes de ir a la Papelera.
+dias_descargas = 7
+# Cuántos días antes se avisa (en Pendientes y con una notificación de Windows).
+dias_aviso = 1
+notificar = true
+
+[revision]
+# Carpetas de capturas y grabaciones de pantalla que se revisan cada semana.
+carpetas = ['C:\Users\<usuario>\OneDrive\Imágenes\Capturas de pantalla', 'C:\Users\<usuario>\Videos\Captures']
+# Solo entran las que tengan más de estos días.
+dias_minimos = 7
+# Día de la revisión: lunes, martes, miércoles, jueves, viernes, sábado o domingo.
+dia = 'lunes'
+# Lo que marques «Dejar» sigue saliendo cada semana; pasadas estas semanas desde la primera vez,
+# se queda donde está para siempre y deja de salir.
+semanas_dejar = 4
+
+[sincro]
+# true = solo anota lo que haría (en datos\sincro_plan.txt); false = sincroniza de verdad.
+simulacion = false
+# Una pasada al encender el PC y luego cada estos minutos (y cuando pulses «Sincronizar ahora»).
+cada_minutos = 60
+# Si una pasada fuera a mandar a la papelera más archivos que estos, se para y te pregunta.
+max_borrados = 20
+# Los repos git solo se copian (de OneDrive a las otras copias) si llevan estos minutos sin cambios.
+minutos_repo_quieto = 10
+
+# Las otras copias. «carpetas»: las carpetas de OneDrive que se sincronizan con esa copia.
+[[sincro.copias]]
+nombre = 'G:'
+raiz = 'G:\Mi unidad'
+carpetas = ['1 - Universidad UPF']
+
+[[sincro.copias]]
+nombre = 'H:'
+raiz = 'H:\Mi unidad'
+carpetas = ['1 - Universidad UPF', '2 - Trabajo', '3 - Idiomas', '4 - Personal']
+
+[docs]
+# Copias en Word de los Google Docs: el script de cada cuenta deja aquí los .docx y el manifest.json.
+# «copia» es el sitio de esa cuenta en el sincronizador: el Word nunca se sube a esa copia.
+[[docs.cuentas]]
+copia = 'G:'
+exportados = 'G:\Mi unidad\_exportados_docs'
+
+[[docs.cuentas]]
+copia = 'H:'
+exportados = 'H:\Mi unidad\_exportados_docs'
+
+[espacio]
+# Plan de OneDrive en GB (el uso se calcula sumando lo que hay en la carpeta: es una estimación).
+cuota_onedrive_gb = 5
+aviso_onedrive_pct = 90
+# G: y H: avisan al pasar de este porcentaje o al quedar menos de estos MB libres.
+aviso_drive_pct = 95
+aviso_drive_mb_libres = 500
+
+[copia]
+# Copia semanal (los lunes) de lo aprendido, la configuración y los datos del programa.
+carpeta = 'C:\Users\<usuario>\OneDrive\4 - Personal\Copia del Organizador'
+guardar = 4
+
+[historial]
+# Días que se guardan las acciones (con su «Deshacer»).
+dias = 30
