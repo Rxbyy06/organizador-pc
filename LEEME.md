@@ -77,7 +77,8 @@ Contiene `aprendido.txt`, `config.toml` y los datos del programa: el índice, el
   - **Un conflicto** (el mismo archivo cambiado en dos sitios entre pasadas) guarda las dos versiones: la otra queda como «Nombre (conflicto AAAA-MM-DD)».
 - **Seguridad:**
   - **Si G: o H: no responde** (Drive cerrado), ese sitio se salta: nunca cuenta como «se ha borrado todo».
-  - **Si una pasada fuera a mandar a la papelera más de 20 archivos**, se para y abre una ventana para que elijas: «Recuperarlos» o «Mandarlos a la papelera en todos».
+  - **Si una pasada fuera a mandar a la papelera más de 20 archivos**, se para y abre una ventana para que elijas: «Recuperarlos» o «Mandarlos a la papelera en todos». Lo que elijas se aplica en la pasada siguiente, que empieza sola.
+  - **Si mueves o renombras carpetas a un repo que estás usando**, no pregunta: espera a que el repo lleve 10 minutos quieto y entonces lo mueve también en G: y H:, de una vez.
   - **Si H: no tiene espacio**, lo que no cabe espera a la siguiente pasada y avisa.
 - **Repos git:** solo van de OneDrive a G: y H:, y solo cuando llevan 10 minutos sin cambios. Lo que cambies dentro de un repo en G: o H: no se trae: se repone el de OneDrive y lo otro va a la papelera.
 - **Lo que no se sincroniza:**
@@ -152,7 +153,7 @@ Tras cambiar algo: icono → Salir, y vuelve a abrirlo desde el menú Inicio.
 |---|---|
 | Programa | `organizador\` y `organizador.pyw` |
 | Lo que puedes editar | `config.toml` y `aprendido.txt` |
-| Datos del programa | `datos\`: `indice.sqlite` (huellas), `historial.sqlite` (historial y Pendientes) y `registro.log` (lo que pasa, por si algo falla) |
+| Datos del programa | `datos\`: `indice.sqlite` (huellas), `historial.sqlite` (historial y Pendientes) y `registro.log` (lo que pasa, por si algo falla). Si alguna vez el programa deja de responder, `cuelgues.log` dice en qué estaba |
 | Entorno de Python propio | `.venv\` |
 | Pruebas | `tests\` (cómo lanzarlas: en `docs\TRASPASO.md`) |
 | Scripts de Google | `apps_script\exportar_docs.gs` (el que está instalado en tus dos cuentas) |

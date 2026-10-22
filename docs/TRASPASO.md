@@ -32,7 +32,7 @@ Un único programa en Python que arranca con Windows y vive como un icono junto 
 | Código | Este repositorio (rama `main`) |
 | Configuración editable | `config.toml`, creado a partir de `config.example.toml` (rutas, días, umbrales, copias del sincronizador…), con comentarios |
 | Lo aprendido (editable) | `aprendido.txt`: `curso N`, `contexto N`, `actividad N` (Aula Global) y `web dominio` → carpeta |
-| Datos (no van a git) | `datos\`: `indice.sqlite` (huellas y palabras), `historial.sqlite` (historial, Descargas, estado, estadísticas, duplicados vistos), `sincro.sqlite` (estado por sitio y base acordada), `docs.sqlite` (Word ↔ Doc, PDF decididos), `registro.log`, `sincro_plan.txt` (última pasada) |
+| Datos (no van a git) | `datos\`: `indice.sqlite` (huellas y palabras), `historial.sqlite` (historial, Descargas, estado, estadísticas, duplicados vistos), `sincro.sqlite` (estado por sitio y base acordada), `docs.sqlite` (Word ↔ Doc, PDF decididos), `registro.log`, `sincro_plan.txt` (última pasada), `cuelgues.log` (solo si la interfaz se queda colgada: en qué estaba cada hilo) |
 | Copia semanal de los datos | `Organizador AAAA-MM-DD.zip` en la carpeta `[copia]` de `config.toml` (las 4 últimas) |
 | Entorno Python | `.venv\` (Python 3.14, dependencias en `requirements.txt`; PyMuPDF fijado en 1.28.2 porque la 2.0 arrastra un modelo de IA de 170 MB) |
 | Arranque | Acceso directo «Organizador del PC» en la carpeta Inicio y en el menú Inicio (`instalar.py` / `instalar.py --quitar`) |
@@ -42,7 +42,7 @@ Sitios (mi configuración): OneDrive (5 GB) en el centro, G: (Drive de la univer
 
 ## 4. Cómo funciona por dentro
 
-**Arranque** (`organizador.pyw` → `app.main`): mutex de instancia única, registro, `App` con tres hilos además del de las ventanas: el vigilante de Descargas (watchdog), el hilo de índice y limpieza (escaneo cada 30 min, huellas solo con el PC inactivo 5 min, limpieza/espacio/turno semanal cada hora) y el hilo del sincronizador (primera pasada a los 90 s, luego cada hora o con «Sincronizar ahora»). Las ventanas solo se tocan desde el hilo de Tk (`App.en_ui`). Lo pesado va en `App.ejecutar` (hilo aparte) y vuelve a la interfaz al terminar. Los hilos de fondo usan `THREAD_MODE_BACKGROUND` (procesador y disco en prioridad baja) y se pausan con pantalla completa, batería baja o «Pausar».
+**Arranque** (`organizador.pyw` → `app.main`): mutex de instancia única, registro, `App` con cuatro hilos además del de las ventanas: el vigilante de Descargas (watchdog), el hilo de índice y limpieza (escaneo cada 30 min, huellas solo con el PC inactivo 5 min, limpieza/espacio/turno semanal cada hora) y el hilo del sincronizador (primera pasada a los 90 s, luego cada hora o con «Sincronizar ahora») y el vigía (si la interfaz pasa 30 s sin responder, escribe en `datos\cuelgues.log` la pila de cada hilo; si Python entero está bloqueado lo escribe `faulthandler`). Las ventanas solo se tocan desde el hilo de Tk (`App.en_ui`). Lo pesado va en `App.ejecutar` (hilo aparte) y vuelve a la interfaz al terminar. **La interfaz nunca espera al sincronizador**: `Sincronizador._lock` dura toda la pasada, así que `decidir()` escribe con su propia conexión SQLite (modo WAL) y `ultima()` está en memoria. Los hilos de fondo usan `THREAD_MODE_BACKGROUND` (procesador y disco en prioridad baja) y se pausan con pantalla completa, batería baja o «Pausar».
 
 **Organizador.** `vigilante` espera a que el tamaño se quede quieto (ignora `.crdownload`, `.part`…). `sugeridor` decide la carpeta por este orden: reglas de `aprendido.txt` (lee el flujo `Zone.Identifier` con la web de origen) → parecido TF-IDF del contenido con cada carpeta (`perfil.py`, a partir del índice) → categoría por palabras (tema, examen, seminari…). El nombre sigue unas normas fijas (`2024-25 - Final - Soluciones`, `Tema 03 - …`, `Práctica 2 - …`) con el título del PDF (`contenido.py` arregla los acentos de LaTeX) y el curso del examen sacado del texto o de la fecha de creación del PDF. Avisos: idéntico (índice de huellas), casi idéntico (huella del texto), versión nueva, enunciado/soluciones, PDF definitivo de un Doc. Los ZIP se descomprimen en el destino con nombres NFC. Al aceptar se aprende la carpeta para ese curso, recurso o web.
 
@@ -51,12 +51,13 @@ Sitios (mi configuración): OneDrive (5 GB) en el centro, G: (Drive de la univer
 **Sincronizador** (`sincro.py`, explicado en su cabecera):
 1. Escanea cada sitio (tamaño y fecha) y compara con el estado de ese mismo sitio en la última pasada. Solo calcula la huella de lo cambiado (en OneDrive la reutiliza del índice).
 2. Decide el objetivo de cada archivo: cambio en un solo sitio → gana; en varios con distinto contenido → conflicto (el más reciente conserva el nombre; el otro queda como `Nombre (conflicto AAAA-MM-DD)`); modificar gana a borrar.
-3. Aplica primero en OneDrive y luego en G:/H:. Lo que desaparece y reaparece con la misma huella se mueve, y una carpeta renombrada entera se renombra con una sola operación. La copia va a `…orgsync-tmp` y luego se renombra.
+3. Aplica primero en OneDrive y luego en G:/H:. Lo que desaparece y reaparece con la misma huella se mueve, y una carpeta renombrada entera se renombra con una sola operación (`_agrupar_carpetas`, al ejecutar y después del freno). Se prueba cada nivel que comparten origen y destino, así que también cuenta una carpeta metida en otra. También cuenta aunque dentro haya archivos que ya no deben estar (p. ej. el `.git\index` que git cambió): se mandan antes a la papelera desde su sitio, y si no se puede, se vuelve a mover archivo a archivo. El destino puede existir solo como carpetas vacías, que se quitan antes. La copia va a `…orgsync-tmp` y luego se renombra.
 4. Guarda solo las filas que cambian (`_guardar` con diferencias).
 
 **Protecciones del sincronizador:**
 - Un sitio ilegible o con una carpeta principal desaparecida se salta entero.
-- Freno de borrados: más de 20 archivos (cantidad fija) → para y abre una ventana para «Recuperar» o «Mandar a la papelera en todos».
+- Freno de borrados: más de 20 archivos (cantidad fija) → para y abre una ventana para «Recuperar» o «Mandar a la papelera en todos». La decisión se guarda en segundo plano y vale desde la pasada siguiente.
+- Lo que desaparece de OneDrive y reaparece (mismo nombre, tamaño y fecha) dentro de un repo aún ocupado no es un borrado: espera sin tocarse ni contar para el freno (`Informe.esperan_repo`). Tampoco se crea aún la carpeta del repo en las copias. Cuando el repo está quieto se mueve, normalmente con un solo renombrado.
 - Un archivo que pasa a 0 bytes no se propaga.
 - La versión de OneDrive que va a ser sustituida desde G:/H: se manda antes a la Papelera.
 - Sin espacio en el destino → se deja pendiente.
@@ -85,7 +86,7 @@ Sitios (mi configuración): OneDrive (5 GB) en el centro, G: (Drive de la univer
 
 | Orden | Qué prueba |
 |---|---|
-| `.venv\Scripts\python.exe -m unittest discover tests` | 57 pruebas: reglas del organizador, limpieza y revisión (reloj simulado), sincronizador (carpetas locales como OneDrive/G:/H:), copias Word, resumen/espacio/copia. Lo que mandan a la Papelera lo recuperan al acabar |
+| `.venv\Scripts\python.exe -m unittest discover tests` | 70 pruebas: reglas del organizador, limpieza y revisión (reloj simulado), sincronizador (carpetas locales como OneDrive/G:/H:), copias Word, resumen/espacio/copia. Lo que mandan a la Papelera lo recuperan al acabar |
 | `python tests/crear_sandbox.py pruebas` | Crea `pruebas\`, una copia de la estructura real con archivos de relleno (sin las notas privadas) y una config que **nunca** apunta a los G:/H: reales |
 | `python tests/prueba_organizador.py pruebas <capturas>` | De punta a punta con ventanas de verdad: descargas, sugerencias, Aceptar/Descartar/Más tarde, ZIP, deshacer (49 comprobaciones) |
 | `python tests/prueba_limpieza_revision.py pruebas <capturas>` | Aviso del día 6, Papelera del día 7, ventana semanal, «Guardar en…», deshacer (18) |

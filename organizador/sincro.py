@@ -14,6 +14,7 @@ si una pasada fuera a mandar a la papelera más de N archivos, se para y pregunt
 definitivamente (va a la papelera de ese sitio); los repos git solo van de OneDrive a las copias,
 y solo cuando llevan unos minutos sin cambios.
 """
+import bisect
 import datetime
 import logging
 import os
@@ -24,7 +25,7 @@ import stat
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from . import papelera
 from .huellas import huella, ignorado
@@ -94,6 +95,7 @@ class Informe:
     sin_espacio: Counter = field(default_factory=Counter)
     retenidos: list[tuple[str, list[str]]] = field(default_factory=list)   # (ruta, sitios donde se borró)
     repos_ocupados: list[str] = field(default_factory=list)
+    esperan_repo: list[str] = field(default_factory=list)   # movidos a un repo aún ocupado: se moverán luego
     repos_ignorados: list[str] = field(default_factory=list)
     no_disponibles: list[str] = field(default_factory=list)
     avisos: list[str] = field(default_factory=list)
@@ -123,6 +125,9 @@ class Informe:
             partes.append('sin espacio en ' + ', '.join(self.sin_espacio))
         if self.retenidos:
             partes.append(f'{len(self.retenidos)} borrados esperando tu confirmación')
+        if self.esperan_repo:
+            partes.append(f'{len(self.esperan_repo)} movidos a un repo que se está usando: se moverán cuando '
+                          'lleve un rato quieto')
         if self.errores:
             partes.append(f'{len(self.errores)} no se pudieron (se reintenta)')
         return '; '.join(partes) or 'todo igual'
@@ -143,8 +148,9 @@ class Sincronizador:
         self.cfg, self.historial, self.indice, self.ahora = cfg, historial, indice, ahora
         self.replicas = [Replica('OneDrive', cfg.onedrive, cfg.carpetas_indice)] + \
                         [Replica(c['nombre'], c['raiz'], c['carpetas']) for c in cfg.copias]
-        self._lock = threading.Lock()
-        self.db = sqlite3.connect(os.path.join(cfg.datos, 'sincro.sqlite'), check_same_thread=False)
+        self._lock = threading.Lock()                # una pasada cada vez (dura lo que dure la pasada)
+        self._ruta_db = os.path.join(cfg.datos, 'sincro.sqlite')
+        self.db = sqlite3.connect(self._ruta_db, check_same_thread=False)
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.executescript('''
             CREATE TABLE IF NOT EXISTS estado (replica TEXT, clave TEXT, ruta TEXT, tam INTEGER, mtime REAL,
@@ -153,6 +159,7 @@ class Sincronizador:
             CREATE TABLE IF NOT EXISTS decisiones (clave TEXT PRIMARY KEY, accion TEXT);
             CREATE TABLE IF NOT EXISTS info (clave TEXT PRIMARY KEY, valor TEXT);
         ''')
+        self._ultima = float(self.info('ultima', '0') or 0)   # en memoria: la bandeja no toca la base
 
     def excluir(self, por_copia: dict[str, set[str]]) -> None:
         """Archivos que no deben ir a cierta copia (los Word de los Docs de esa cuenta)."""
@@ -176,9 +183,16 @@ class Sincronizador:
         return dict(self.db.execute('SELECT clave, accion FROM decisiones'))
 
     def decidir(self, claves: list[str], accion: str) -> None:
-        """accion: 'borrar' (mandarlos a la papelera en todos los sitios) o 'recuperar'."""
-        with self._lock, self.db:
-            self.db.executemany('INSERT OR REPLACE INTO decisiones VALUES (?,?)', [(k, accion) for k in claves])
+        """accion: 'borrar' (mandarlos a la papelera en todos los sitios) o 'recuperar'.
+
+        No espera a la pasada en curso: escribe con su propia conexión (la base está en modo WAL) y la
+        decisión cuenta desde la pasada siguiente."""
+        db = sqlite3.connect(self._ruta_db, timeout=60)
+        try:
+            with db:
+                db.executemany('INSERT OR REPLACE INTO decisiones VALUES (?,?)', [(k, accion) for k in claves])
+        finally:
+            db.close()
 
     def info(self, k: str, defecto: str = '') -> str:
         f = self.db.execute('SELECT valor FROM info WHERE clave=?', (k,)).fetchone()
@@ -187,6 +201,8 @@ class Sincronizador:
     def _poner_info(self, k: str, v: str) -> None:
         with self.db:
             self.db.execute('INSERT OR REPLACE INTO info VALUES (?,?)', (k, v))
+        if k == 'ultima':
+            self._ultima = float(v)
 
     def _guardar(self, estado: dict[str, dict[str, Entrada]], base: dict[str, Objetivo], hechas: set[str],
                  antes: dict[str, dict[str, Entrada]] | None = None, base_antes: dict[str, Objetivo] | None = None) -> None:
@@ -379,6 +395,17 @@ class Sincronizador:
             return next((rk for rk in repos if k.startswith(rk + SEP)), None)
 
         omitir: set[str] = set()
+        # Lo que desaparece de OneDrive y reaparece (mismo nombre, tamaño y fecha) dentro de un repo aún ocupado
+        # se ha movido allí, no se ha borrado: espera sin tocarse ni contar para el freno, y cuando el repo
+        # esté quieto se moverá también en las copias.
+        if ocupados:
+            def firma(k, e):
+                return k.rsplit(SEP, 1)[-1], e.tam, int(e.mtime)
+            en_ocupados = {firma(k, e) for k, e in so.items() if not e.dir and repo_de(k) in ocupados}
+            esperan = {k for k, p in estado.get(O.nombre, {}).items()
+                       if not p.dir and k not in so and repo_de(k) is None and firma(k, p) in en_ocupados}
+            omitir |= esperan
+            inf.esperan_repo = [estado[O.nombre][k].ruta for k in sorted(esperan)]
 
         def cambio(r: Replica, k: str):
             if not r.cubre(k):
@@ -412,8 +439,10 @@ class Sincronizador:
         T: dict[str, Objetivo] = {}
         ocupadas = set(claves)
         for k in sorted(claves):
+            if k in omitir:
+                continue
             rk = repo_de(k)
-            if rk and rk in ocupados:
+            if rk in ocupados or k in ocupados:          # (también la carpeta del repo: aún no se crea en las copias)
                 omitir.add(k)
                 continue
             cs = {r.nombre: c for r in disp if (c := cambio(r, k))}
@@ -578,38 +607,51 @@ class Sincronizador:
                     sobra[h].remove(viejo)
                 ks.remove(k)
                 mover.append((viejo, k))
-        renombrar_dirs, mover = self._agrupar_carpetas(mover, s, T)
-        # Las carpetas que se renombran enteras no hay que crearlas ni quitarlas aparte.
-        crear_dirs = [k for k in crear_dirs if not any(k == b or k.startswith(b + SEP) for _, b in renombrar_dirs)]
-        quitar_dirs = [k for k in quitar_dirs if not any(k == a or k.startswith(a + SEP) for a, _ in renombrar_dirs)]
         for h, ks in necesita.items():
             copiar += ks
         for ks in sobra.values():
             papelera_ += ks
-        return {'crear_dirs': sorted(crear_dirs, key=len), 'renombrar_dirs': renombrar_dirs, 'mover': mover,
-                'copiar': copiar, 'papelera': papelera_, 'quitar_dirs': sorted(quitar_dirs, key=len, reverse=True)}
+        return {'crear_dirs': sorted(crear_dirs, key=len), 'mover': mover, 'copiar': copiar, 'papelera': papelera_,
+                'quitar_dirs': sorted(quitar_dirs, key=len, reverse=True)}
 
     @staticmethod
-    def _agrupar_carpetas(movs, s, T):
-        """Si se ha renombrado o movido una carpeta entera, se renombra la carpeta (una sola operación)."""
-        grupos: dict[tuple[str, str], list] = {}
+    def _agrupar_carpetas(movs, s, T, tirar: set[str]):
+        """Si se ha renombrado o movido una carpeta entera, se renombra la carpeta (una sola operación).
+
+        Se prueba cada nivel que comparten el origen y el destino (de la carpeta más alta a la más honda), así
+        que un repo metido en otra carpeta también se mueve de una vez. Cuenta como entera aunque dentro haya
+        archivos que van a la papelera (p. ej. el .git\\index que git cambió tras mover el repo): se mandan
+        antes. El destino no puede tener archivos (carpetas vacías sí: se quitan antes).
+        Devuelve [(carpeta vieja, carpeta nueva, sus movimientos, lo que va antes a la papelera)] y los
+        movimientos que quedan sueltos."""
+        candidatos: dict[tuple[str, str], list] = {}
         for viejo, nuevo in movs:
             a, b = s[viejo].ruta.split(SEP), T[nuevo].ruta.split(SEP)
             while len(a) > 1 and len(b) > 1 and clave(a[-1]) == clave(b[-1]):
                 a, b = a[:-1], b[:-1]
-            if len(a) < len(s[viejo].ruta.split(SEP)):          # comparten al menos el nombre del archivo
-                grupos.setdefault((SEP.join(a), SEP.join(b)), []).append((viejo, nuevo))
-        renombres, hechos = [], set()
-        for (da, db), lista in sorted(grupos.items(), key=lambda x: x[0][0].count(SEP)):
+                candidatos.setdefault((SEP.join(a), SEP.join(b)), []).append((viejo, nuevo))
+        todas, archivos = sorted(s), sorted(k for k, e in s.items() if not e.dir)
+
+        def bajo(lista, k):                              # lo que hay dentro de la carpeta k (lista ordenada)
+            return lista[bisect.bisect_left(lista, k + SEP):bisect.bisect_left(lista, k + chr(ord(SEP) + 1))]
+
+        def se_cruzan(x, y):
+            return x == y or x.startswith(y + SEP) or y.startswith(x + SEP)
+        grupos = []
+        for (da, db), lista in sorted(candidatos.items(), key=lambda x: (x[0][0].count(SEP), x[0])):
             ka, kb = clave(da), clave(db)
-            if any(ka == h or ka.startswith(h + SEP) for h, _ in renombres):
+            if SEP not in ka or SEP not in kb or ka not in s or not s[ka].dir:
+                continue                                 # nunca una carpeta principal entera
+            if any(se_cruzan(x, y) for g in grupos for x in g[:2] for y in (ka, kb)):
                 continue
-            archivos = {k for k, e in s.items() if k.startswith(ka + SEP) and not e.dir}
-            if ka in s and kb not in s and not any(k.startswith(kb + SEP) for k in s) \
-                    and archivos == {v for v, _ in lista}:
-                renombres.append((ka, kb))
-                hechos |= {v for v, _ in lista}
-        return [(ka, kb) for ka, kb in renombres], [m for m in movs if m[0] not in hechos]
+            if (kb in s and not s[kb].dir) or any(not s[k].dir for k in bajo(todas, kb)):
+                continue                                 # el destino ya tiene algo
+            movidos = {v for v, _ in lista}
+            dentro = bajo(archivos, ka)
+            if all(k in movidos or k in tirar for k in dentro):
+                grupos.append((ka, kb, lista, [k for k in dentro if k in tirar]))
+        hechos = {v for g in grupos for v, _ in g[2]}
+        return grupos, [m for m in movs if m[0] not in hechos]
 
     def _ejecutar(self, r: Replica, plan, T, scans, nuevo_estado, simulacion, inf):
         O = self.replicas[0]
@@ -625,34 +667,51 @@ class Sincronizador:
             st = os.stat(ruta_larga(r.ruta(ruta)))
             ne[k] = Entrada(ruta, st.st_size, st.st_mtime, h)
 
-        for k in plan['crear_dirs']:
-            anotar(f'crear carpeta «{T[k].ruta}»')
-            if not simulacion:
-                try:
-                    os.makedirs(ruta_larga(r.ruta(T[k].ruta)), exist_ok=True)
-                    poner(k, T[k].ruta, DIR, True)
-                except OSError as e:
-                    inf.errores.append(f'{r.nombre}: crear «{T[k].ruta}»: {e}')
-        for ka, kb in plan['renombrar_dirs']:
+        # Después del freno (lo retenido ya no está en plan['papelera']): carpetas que se renombran enteras.
+        grupos, mover = self._agrupar_carpetas(plan['mover'], s, T, set(plan['papelera']))
+        # Las carpetas de dentro no se quitan aparte, y las que falten dentro del destino se crean después.
+        quitar_dirs = [k for k in plan['quitar_dirs'] if not any(k == g[0] or k.startswith(g[0] + SEP) for g in grupos)]
+        en_destino = {k for k in plan['crear_dirs'] + [x for x in s if x in T and T[x].hash == DIR]
+                      if any(k == g[1] or k.startswith(g[1] + SEP) for g in grupos)} if grupos else set()
+        crear_despues = sorted(en_destino, key=len)      # (las vacías que ya había se quitan antes de renombrar)
+
+        def crear(ks):
+            for k in ks:
+                if k in ne:                              # ya está (ha llegado con la carpeta renombrada)
+                    continue
+                anotar(f'crear carpeta «{T[k].ruta}»')
+                if not simulacion:
+                    try:
+                        os.makedirs(ruta_larga(r.ruta(T[k].ruta)), exist_ok=True)
+                        poner(k, T[k].ruta, DIR, True)
+                    except OSError as e:
+                        inf.errores.append(f'{r.nombre}: crear «{T[k].ruta}»: {e}')
+        crear([k for k in plan['crear_dirs'] if k not in en_destino])
+        tirados = set()
+        for ka, kb, movs, a_tirar in grupos:
             viejo, nuevo = s[ka].ruta, T[kb].ruta if kb in T else self._ruta_dir(kb, T)
-            anotar(f'renombrar carpeta «{viejo}» → «{nuevo}»')
-            if simulacion:
-                inf.movidos[r.nombre] += 1
+            tirados |= set(a_tirar)
+            if self._papelera(r, a_tirar, s, ne, simulacion, inf, anotar) or \
+                    not self._quitar_vacias(r, kb, s, ne, simulacion, inf, anotar):
+                mover += movs                            # algo no se pudo: archivo a archivo
                 continue
+            anotar(f'renombrar carpeta «{viejo}» → «{nuevo}»')
             try:
-                os.makedirs(ruta_larga(os.path.dirname(r.ruta(nuevo))), exist_ok=True)
-                os.rename(ruta_larga(r.ruta(viejo)), ruta_larga(r.ruta(nuevo)))
-                for k in [x for x in ne if x == ka or x.startswith(ka + SEP)]:
-                    e = ne.pop(k)
-                    k2 = kb + k[len(ka):]
-                    e.ruta = nuevo + e.ruta[len(viejo):]
-                    ne[k2] = e
-                inf.movidos[r.nombre] += 1
+                if not simulacion:
+                    os.makedirs(ruta_larga(os.path.dirname(r.ruta(nuevo))), exist_ok=True)
+                    os.rename(ruta_larga(r.ruta(viejo)), ruta_larga(r.ruta(nuevo)))
             except OSError as e:
                 inf.errores.append(f'{r.nombre}: renombrar «{viejo}»: {e}')
+                mover += movs
+                continue
+            for k in [x for x in ne if x == ka or x.startswith(ka + SEP)]:
+                e = ne.pop(k)                            # (copia: la Entrada es la misma que la del escaneo)
+                ne[kb + k[len(ka):]] = replace(e, ruta=nuevo + e.ruta[len(viejo):])
+            inf.movidos[r.nombre] += 1
+        crear(crear_despues)
         # Contenidos que este sitio aún necesita: nunca se sobrescribe un archivo que tenga uno de ellos.
         faltan = Counter(T[k].hash for k in plan['copiar'])
-        for viejo, nuevo in plan['mover']:
+        for viejo, nuevo in mover:
             de, a = s[viejo].ruta, T[nuevo].ruta
             anotar(f'mover «{de}» → «{a}»')
             if simulacion:
@@ -668,7 +727,8 @@ class Sincronizador:
             except OSError as e:
                 faltan[T[nuevo].hash] += 1
                 inf.errores.append(f'{r.nombre}: mover «{de}»: {e}')
-        papelera_primero = [k for k in plan['papelera'] if k in plan['copiar']]   # repos tocados en la copia
+        copiar = set(plan['copiar'])                     # repos tocados en la copia: a la papelera antes de copiar
+        papelera_primero = [k for k in plan['papelera'] if k in copiar and k not in tirados]
         self._papelera(r, papelera_primero, s, ne, simulacion, inf, anotar)
         espacio = None
         for k in plan['copiar']:
@@ -716,8 +776,9 @@ class Sincronizador:
                     self.indice.anadir(r.ruta(destino), t.hash)
             except OSError as e:
                 inf.errores.append(f'{r.nombre}: copiar «{t.ruta}»: {e}')
-        self._papelera(r, [k for k in plan['papelera'] if k not in papelera_primero], s, ne, simulacion, inf, anotar)
-        for k in plan['quitar_dirs']:
+        tirados |= set(papelera_primero)
+        self._papelera(r, [k for k in plan['papelera'] if k not in tirados], s, ne, simulacion, inf, anotar)
+        for k in quitar_dirs:
             ruta = s[k].ruta
             try:
                 vacia = not os.listdir(ruta_larga(r.ruta(ruta)))
@@ -733,7 +794,9 @@ class Sincronizador:
                 except OSError as e:
                     inf.errores.append(f'{r.nombre}: quitar carpeta «{ruta}»: {e}')
 
-    def _papelera(self, r, claves, s, ne, simulacion, inf, anotar):
+    def _papelera(self, r, claves, s, ne, simulacion, inf, anotar) -> list[str]:
+        """Devuelve los que no se pudieron mandar."""
+        fallidos = []
         for k in claves:
             if k not in s:
                 continue
@@ -751,6 +814,25 @@ class Sincronizador:
             except OSError as e:
                 inf.a_papelera.pop()
                 inf.errores.append(f'{r.nombre}: a la papelera «{ruta}»: {e}')
+                fallidos.append(k)
+        return fallidos
+
+    @staticmethod
+    def _quitar_vacias(r, k, s, ne, simulacion, inf, anotar) -> bool:
+        """Quita la carpeta k y sus subcarpetas, que están vacías (es el destino de un renombrado). ¿Se pudo?"""
+        if k not in s:
+            return True
+        for x in sorted([k] + [x for x in s if x.startswith(k + SEP)], key=len, reverse=True):
+            anotar(f'quitar carpeta vacía «{s[x].ruta}»')
+            if simulacion:
+                continue
+            try:
+                os.rmdir(ruta_larga(r.ruta(s[x].ruta)))
+                ne.pop(x, None)
+            except OSError as e:
+                inf.errores.append(f'{r.nombre}: quitar carpeta «{s[x].ruta}»: {e}')
+                return False
+        return True
 
     def _fuente(self, k, t, r, scans, nuevo_estado):
         """De dónde copiar: de OneDrive si ya lo tiene (estrella); si no, del sitio donde cambió."""
@@ -793,4 +875,4 @@ class Sincronizador:
             raise
 
     def ultima(self) -> float:
-        return float(self.info('ultima', '0') or 0)
+        return self._ultima

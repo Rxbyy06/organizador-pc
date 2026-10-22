@@ -1,7 +1,21 @@
 """Ventana del sincronizador: confirmar (o deshacer) un borrado masivo."""
+import os
+
 import customtkinter as ctk
 
-from .ventanas import GRIS, NARANJA, ROJO, Ventana, _corto, fuente
+from .ventanas import GRIS, ROJO, Ventana, _corto, fuente
+
+
+def lineas_borrados(retenidos: list[tuple[str, list[str]]]) -> list[str]:
+    """Los borrados retenidos, agrupados por carpeta: «carpeta\\  ·  N archivos  ·  falta en G:, H:»."""
+    grupos: dict[tuple[str, tuple[str, ...]], list[str]] = {}
+    for ruta, donde in retenidos:
+        grupos.setdefault((os.path.dirname(ruta), tuple(donde)), []).append(ruta)
+    lineas = []
+    for (carpeta, donde), rutas in sorted(grupos.items(), key=lambda x: x[0][0].casefold()):
+        que = rutas[0] if len(rutas) == 1 else f'{carpeta}{os.sep}  ·  {len(rutas)} archivos'
+        lineas.append(f'{que}  ·  falta en {", ".join(donde)}')
+    return lineas
 
 
 class VentanaBorrados(Ventana):
@@ -20,15 +34,11 @@ class VentanaBorrados(Ventana):
                                   'decidas. Si los borraste tú, mándalos a la papelera también en los demás sitios; si no '
                                   'sabes qué ha pasado, recupéralos.',
                      font=fuente(12), text_color=GRIS, anchor='w', justify='left', wraplength=620).pack(fill='x', pady=(2, 8))
-        lista = ctk.CTkScrollableFrame(cuerpo, width=620, height=300)
+        # Un solo cuadro de texto (no una fila de widgets por archivo): se abre al instante aunque sean miles.
+        lista = ctk.CTkTextbox(cuerpo, width=640, height=300, font=fuente(11), wrap='none')
         lista.pack(fill='both', expand=True)
-        for ruta, donde in retenidos[:500]:
-            f = ctk.CTkFrame(lista, fg_color='transparent')
-            f.pack(fill='x')
-            ctk.CTkLabel(f, text=_corto(ruta, 80), font=fuente(11), anchor='w').pack(side='left')
-            ctk.CTkLabel(f, text='falta en ' + ', '.join(donde), font=fuente(10), text_color=NARANJA).pack(side='right')
-        if n > 500:
-            ctk.CTkLabel(lista, text=f'… y {n - 500} más', text_color=GRIS).pack(pady=4)
+        lista.insert('1.0', '\n'.join(lineas_borrados(retenidos)))
+        lista.configure(state='disabled')
         botones = ctk.CTkFrame(cuerpo, fg_color='transparent')
         botones.pack(fill='x', pady=(10, 0))
         ctk.CTkButton(botones, text='Recuperarlos', width=150, font=fuente(13, True),
@@ -41,10 +51,8 @@ class VentanaBorrados(Ventana):
         self.mostrar('centro')
 
     def _decidir(self, accion):
-        from .sincro import clave
-        self.app.sincro.decidir([clave(r) for r, _ in self.retenidos], accion)
         self.destroy()
-        self.app.sincronizar_ahora()
+        self.app.decidir_borrados(self.retenidos, accion)
 
 
 class VentanaPDF(Ventana):

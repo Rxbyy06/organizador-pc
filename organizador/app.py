@@ -1,5 +1,6 @@
 """Arranque del Organizador: icono, vigilante de Descargas, índice en segundo plano y ventanas."""
 import argparse
+import faulthandler
 import logging
 import logging.handlers
 import os
@@ -21,7 +22,7 @@ from .huellas import Indice
 from .limpieza import Limpieza, en_descargas
 from .perfil import Perfil
 from .revision import Revision
-from .sincro import Sincronizador
+from .sincro import Sincronizador, clave as clave_sincro
 from .sugeridor import Sugeridor
 from .vigilante import Vigilante
 from .ventanas import VentanaDescarga, VentanaHistorial, VentanaPendientes
@@ -31,6 +32,8 @@ from .resumen import Resumen
 from .ventanas_sincro import VentanaBorrados, VentanaPDF
 
 log = logging.getLogger('organizador')
+SEGUNDOS_CUELGUE = 30          # sin responder más que esto: se apunta en datos\cuelgues.log
+VIGIA_CADA = 5                 # cada cuánto mira el vigía
 
 
 class App:
@@ -74,6 +77,7 @@ class App:
         self._retenidos_vistos: tuple = ()
         self._avisos_vistos: set[str] = set()
         self._parar = threading.Event()
+        self._latido = time.monotonic()                 # última vuelta del bucle de la interfaz (para el vigía)
 
     # ── Hilos ───────────────────────────────────────────────────────────────
     def en_ui(self, f) -> None:
@@ -81,6 +85,7 @@ class App:
         self._cola_ui.put(f)
 
     def _bucle_ui(self) -> None:
+        self._latido = time.monotonic()
         try:
             while True:
                 self._cola_ui.get_nowait()()
@@ -90,6 +95,35 @@ class App:
             log.exception('Error en la interfaz')
         self._quizas_mostrar()
         self.root.after(300, self._bucle_ui)
+
+    def _hilo_vigia(self) -> None:
+        """Si la interfaz deja de responder, apunta en datos\\cuelgues.log en qué estaba cada hilo.
+
+        Si ni siquiera este hilo puede correr (Python entero bloqueado), lo apunta faulthandler, que no
+        necesita a Python: se rearma en cada vuelta y solo salta si nadie lo rearma en el doble de tiempo."""
+        ruta = os.path.join(self.cfg.datos, 'cuelgues.log')
+        try:
+            f = open(ruta, 'a', encoding='utf-8')
+        except OSError:
+            log.exception('No puedo abrir %s', ruta)
+            return
+        apuntado, antes = False, time.time()
+        while not self._parar.wait(VIGIA_CADA):
+            if time.time() - antes > VIGIA_CADA + 25:  # el PC estuvo en suspensión: no es un cuelgue
+                self._latido = time.monotonic()
+            antes = time.time()
+            faulthandler.dump_traceback_later(2 * SEGUNDOS_CUELGUE, file=f)
+            parada = time.monotonic() - self._latido
+            if parada > SEGUNDOS_CUELGUE and not apuntado:
+                apuntado = True
+                log.warning('La interfaz lleva %.0f s sin responder: detalles en cuelgues.log', parada)
+                f.write(f'\n{time.strftime("%Y-%m-%d %H:%M:%S")}: la interfaz lleva {parada:.0f} s sin responder\n')
+                f.flush()
+                faulthandler.dump_traceback(file=f, all_threads=True)
+            elif parada <= SEGUNDOS_CUELGUE:
+                apuntado = False
+        faulthandler.cancel_dump_traceback_later()
+        f.close()
 
     def _error_ui(self, tipo, valor, tb):
         log.error('Error en la interfaz: %s', ''.join(traceback.format_exception(tipo, valor, tb)))
@@ -377,6 +411,15 @@ class App:
         if self.sincro_retenidos:
             self.ventanas_aux['borrados'] = VentanaBorrados(self, self.sincro_retenidos)
 
+    def decidir_borrados(self, retenidos: list, accion: str) -> None:
+        """Desde la ventana de borrados. Se guarda en segundo plano, así que la interfaz nunca espera a una
+        pasada en marcha; la decisión se aplica en la pasada siguiente, que se pide al guardarla."""
+        claves = [clave_sincro(r) for r, _ in retenidos]
+        self.sincro_retenidos = []                   # ya decidido: que la bandeja no los vuelva a ofrecer
+        self.bandeja.actualizar()
+        self.ejecutar(lambda: self.sincro.decidir(claves, accion), lambda _: self.sincronizar_ahora(),
+                      'guardar tu decisión sobre los borrados')
+
     def _hilo_sincro(self) -> None:
         sistema.hilo_en_segundo_plano()
         self._parar.wait(90)                         # que el PC acabe de arrancar (y Drive de conectarse)
@@ -466,9 +509,11 @@ class App:
         for aviso in inf.avisos + ([f'Cambios dentro de un repo en una copia: no se traen ({len(inf.repos_ignorados)})']
                                    if inf.repos_ignorados else []):
             self._avisar_una_vez(aviso, 'Sincronización', aviso)
-        self.sincro_retenidos = inf.retenidos
-        clave_ret = tuple(sorted(r for r, _ in inf.retenidos))
-        if inf.retenidos and clave_ret != self._retenidos_vistos:
+        # Lo que se decidió con esta pasada ya en marcha se aplica en la siguiente: no se vuelve a preguntar.
+        decididos = self.sincro.decisiones() if inf.retenidos else {}
+        self.sincro_retenidos = [x for x in inf.retenidos if clave_sincro(x[0]) not in decididos]
+        clave_ret = tuple(sorted(r for r, _ in self.sincro_retenidos))
+        if self.sincro_retenidos and clave_ret != self._retenidos_vistos:
             self._retenidos_vistos = clave_ret
             self.en_ui(self.abrir_borrados)
         self.en_ui(self.bandeja.actualizar)
@@ -528,6 +573,7 @@ class App:
         self._revisar_descargas()
         threading.Thread(target=self._hilo_indice, name='indice', daemon=True).start()
         threading.Thread(target=self._hilo_sincro, name='sincro', daemon=True).start()
+        threading.Thread(target=self._hilo_vigia, name='vigia', daemon=True).start()
         self.root.after(200, self._bucle_ui)
         self.root.after(1500, self.bandeja.actualizar)
         self.root.mainloop()
@@ -535,6 +581,7 @@ class App:
     def salir(self) -> None:
         log.info('Salida')
         self._parar.set()
+        faulthandler.cancel_dump_traceback_later()
         self._sincro_ya.set()
         self.vigilante.parar()
         self.bandeja.parar()

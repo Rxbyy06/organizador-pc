@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import unittest
@@ -124,6 +125,44 @@ class Casos(Base):
                          (1, 1, 0, []))
         self.assertFalse(os.path.exists(os.path.join(self.H, UNI, 'Mates')))
         self.iguales()
+
+    def test_carpeta_renombrada_con_un_archivo_cambiado_sigue_siendo_una_operacion(self):
+        """Como un repo renombrado cuyo .git\\index cambió después: antes eran miles de movimientos sueltos."""
+        os.rename(os.path.join(self.O, UNI, 'Mates'), os.path.join(self.O, UNI, 'Matemàtiques'))
+        escribir(os.path.join(self.O, UNI, 'Matemàtiques', 'Tema 1.pdf'), 'tema 1 nuevo')
+        inf = self.pasada()
+        self.assertEqual((inf.movidos['G:'], inf.movidos['H:'], inf.copiados['G:'], inf.copiados['H:']), (1, 1, 1, 1))
+        viejo = os.path.join(UNI, 'Mates', 'Tema 1.pdf')
+        self.assertEqual(sorted(inf.a_papelera), [f'G:: {viejo}', f'H:: {viejo}'])   # desde su sitio de antes
+        self.assertFalse(os.path.exists(os.path.join(self.G, UNI, 'Mates')))
+        self.assertEqual(self.iguales()[os.path.join(UNI, 'Matemàtiques', 'Tema 1.pdf')], 'tema 1 nuevo')
+
+    def test_carpeta_metida_en_otra_es_una_sola_operacion(self):
+        escribir(os.path.join(self.O, OTRA, 'sub', 'foto 2.jpg'), 'foto 2', VIEJO)
+        self.pasada()
+        os.makedirs(os.path.join(self.O, OTRA, 'Fotos'))
+        os.rename(os.path.join(self.O, OTRA, 'sub'), os.path.join(self.O, OTRA, 'Fotos', 'sub'))
+        inf = self.pasada()
+        self.assertEqual((inf.movidos['H:'], sum(inf.copiados.values()), inf.a_papelera), (1, 0, []))
+        self.assertTrue(any('renombrar carpeta' in p for p in inf.plan))
+        self.iguales()
+
+    def test_destino_con_carpetas_vacias(self):
+        """Una pasada anterior ya creó la carpeta nueva (vacía) en G:: se quita y se renombra la vieja."""
+        os.makedirs(os.path.join(self.G, UNI, 'Matemàtiques', 'Apuntes'))
+        os.rename(os.path.join(self.O, UNI, 'Mates'), os.path.join(self.O, UNI, 'Matemàtiques'))
+        inf = self.pasada()
+        self.assertEqual((inf.movidos['G:'], inf.movidos['H:'], sum(inf.copiados.values()), inf.a_papelera),
+                         (1, 1, 0, []))
+        for raiz in (self.O, self.G, self.H):                      # la subcarpeta vacía se conserva en todos
+            self.assertTrue(os.path.isdir(os.path.join(raiz, UNI, 'Matemàtiques', 'Apuntes')))
+        self.iguales()
+
+    def test_simulacion_de_carpeta_renombrada(self):
+        os.rename(os.path.join(self.O, UNI, 'Mates'), os.path.join(self.O, UNI, 'Matemàtiques'))
+        inf = self.pasada(simulacion=True)
+        self.assertEqual(sorted(p.split(' «')[0] for p in inf.plan), ['[G:] renombrar carpeta', '[H:] renombrar carpeta'])
+        self.assertTrue(os.path.exists(os.path.join(self.G, UNI, 'Mates', 'Tema 1.pdf')))
 
     def test_borrado_en_h_va_a_la_papelera_en_los_demas(self):
         os.remove(os.path.join(self.H, UNI, 'Mates', 'Tema 3.pdf'))
@@ -272,6 +311,31 @@ class Seguridad(Base):
         self.assertEqual(leer(os.path.join(self.O, UNI, 'P1', 'main.c')), 'int main(){}')
         self.assertEqual(len(inf.a_papelera), 1)
 
+    def test_carpeta_movida_a_un_repo_ocupado_no_es_un_borrado(self):
+        """El 22-10-2026: repos renombrados en OneDrive, todavía ocupados → 6633 «borrados» retenidos."""
+        repo = os.path.join(self.O, UNI, 'P1')
+        for f in [os.path.join('.git', 'HEAD'), os.path.join('.git', 'index'), 'main.c'] + \
+                 [os.path.join('datos', f'{i}.txt') for i in range(5)]:
+            escribir(os.path.join(repo, f), f'contenido de {f}', VIEJO)
+        self.pasada()
+        self.assertTrue(os.path.exists(os.path.join(self.H, UNI, 'P1', 'datos', '4.txt')))
+        nuevo = os.path.join(self.O, UNI, 'Práctica 1')
+        os.rename(repo, nuevo)
+        escribir(os.path.join(nuevo, '.git', 'index'), 'index nuevo', time.time())   # git lo acaba de tocar
+        inf = self.pasada()
+        self.assertEqual(inf.retenidos, [])                         # no pide confirmación…
+        self.assertEqual(len(inf.esperan_repo), 7)                  # …espera (todo menos el index, que cambió)
+        self.assertEqual(len(inf.a_papelera), 2)                    # el index viejo, en G: y en H:
+        self.assertTrue(os.path.exists(os.path.join(self.H, UNI, 'P1', 'datos', '4.txt')))
+        self.assertFalse(os.path.exists(os.path.join(self.H, UNI, 'Práctica 1')))   # ni crea aún la carpeta
+        for r, _, fs in os.walk(nuevo):                             # el repo se queda quieto
+            for f in fs:
+                os.utime(os.path.join(r, f), (VIEJO, VIEJO))
+        inf = self.pasada()
+        self.assertEqual((inf.movidos['G:'], inf.movidos['H:'], inf.copiados['G:'], inf.a_papelera), (1, 1, 1, []))
+        self.assertFalse(os.path.exists(os.path.join(self.H, UNI, 'P1')))
+        self.iguales()
+
     def test_archivo_vacio_no_se_propaga(self):
         escribir(os.path.join(self.H, UNI, 'Mates', 'Tema 2.pdf'), '')          # p. ej. un fallo de Drive
         inf = self.pasada()
@@ -296,6 +360,19 @@ class Seguridad(Base):
         self.pasada()                                             # con Papelera normal, ya sí
         self.iguales()
 
+    def test_carpeta_renombrada_si_lo_viejo_no_cabe_en_la_papelera(self):
+        """Si lo que iba antes a la papelera no se puede mandar, no se renombra: archivo a archivo, y lo viejo se queda."""
+        os.rename(os.path.join(self.O, UNI, 'Mates'), os.path.join(self.O, UNI, 'Matemàtiques'))
+        escribir(os.path.join(self.O, UNI, 'Matemàtiques', 'Tema 1.pdf'), 'tema 1 nuevo')
+        with mock.patch.object(papelera, 'capacidad_papelera', lambda ruta: 3):
+            inf = self.pasada()
+        self.assertEqual((inf.movidos['G:'], inf.movidos['H:']), (5, 5))
+        self.assertTrue(any('no cabe en la Papelera' in e for e in inf.errores))
+        self.assertEqual(leer(os.path.join(self.G, UNI, 'Mates', 'Tema 1.pdf')), 'tema 1')   # no se ha perdido
+        self.pasada()                                             # con Papelera normal, ya sí
+        self.assertFalse(os.path.exists(os.path.join(self.G, UNI, 'Mates')))
+        self.iguales()
+
     def test_simulacion_no_toca_nada(self):
         escribir(os.path.join(self.O, UNI, 'nuevo.pdf'), 'nuevo')
         os.remove(os.path.join(self.H, OTRA, 'nota.txt'))
@@ -304,6 +381,49 @@ class Seguridad(Base):
         self.assertTrue(inf.plan)
         self.assertEqual((arbol(self.O), arbol(self.G), arbol(self.H)), antes)
         self.assertEqual(self.pasada(simulacion=True).plan, inf.plan)  # el estado no ha cambiado
+
+
+class Interfaz(Base):
+    """Lo que la interfaz pide al sincronizador nunca espera a que acabe una pasada (el cuelgue del 22-10-2026)."""
+
+    def retener(self):
+        for i in range(5):                                         # max_borrados = 3 en estas pruebas
+            os.remove(os.path.join(self.H, UNI, 'Mates', f'Tema {i}.pdf'))
+        return [S.clave(r) for r, _ in self.pasada().retenidos]
+
+    def test_decidir_no_espera_a_la_pasada(self):
+        claves = self.retener()
+        with self.s._lock:                                         # como si hubiera una pasada en marcha
+            t = threading.Thread(target=self.s.decidir, args=(claves, 'borrar'))
+            t.start()
+            t.join(5)
+            self.assertFalse(t.is_alive())
+        self.assertEqual(len(self.pasada().a_papelera), 10)
+        self.iguales()
+
+    def test_decision_durante_una_pasada_vale_para_la_siguiente(self):
+        claves = self.retener()
+        real = self.s._ejecutar
+
+        def ejecutar_y_decidir(*a, **kw):                          # el usuario pulsa mientras la pasada trabaja
+            self.s.decidir(claves, 'borrar')
+            return real(*a, **kw)
+        with mock.patch.object(self.s, '_ejecutar', ejecutar_y_decidir):
+            inf = self.pasada()
+        self.assertEqual(len(inf.retenidos), 5)                    # esa pasada ya había leído las decisiones…
+        self.assertEqual(set(self.s.decisiones()), set(claves))    # …y no borra las nuevas
+        self.assertEqual(len(self.pasada().a_papelera), 10)
+        self.iguales()
+
+    def test_ultima_pasada_sin_tocar_la_base(self):
+        self.pasada()
+        t = self.s.ultima()
+        self.assertAlmostEqual(t, time.time(), delta=60)
+        with mock.patch.object(self.s, 'db', None):
+            self.assertEqual(self.s.ultima(), t)
+        otro = S.Sincronizador(self.cfg)
+        self.assertEqual(otro.ultima(), t)
+        otro.db.close()
 
 
 if __name__ == '__main__':

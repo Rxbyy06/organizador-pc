@@ -40,7 +40,7 @@ Set `simulacion = true` in `config.toml` to make the app only log what it would 
 .venv\Scripts\python.exe -m unittest discover tests
 ```
 
-57 unit tests cover the organizer rules, the cleanup and review (with a simulated clock), the sync engine (with local folders standing in for OneDrive and both Drives), the Word copies and the reports.
+70 unit tests cover the organizer rules, the cleanup and review (with a simulated clock), the sync engine (with local folders standing in for OneDrive and both Drives), the Word copies and the reports.
 
 ## License
 
