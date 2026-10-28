@@ -24,6 +24,7 @@ class Vigilante(FileSystemEventHandler):
         self._lock = threading.Lock()
         self._obs = Observer()
         self._parar = threading.Event()
+        self._hilo: threading.Thread | None = None
 
     def interesa(self, ruta: str) -> bool:
         nombre = os.path.basename(ruta)
@@ -36,11 +37,17 @@ class Vigilante(FileSystemEventHandler):
     def arrancar(self) -> None:
         self._obs.schedule(self, self.carpeta, recursive=False)
         self._obs.start()
-        threading.Thread(target=self._comprobar, name='descargas-estables', daemon=True).start()
+        self._hilo = threading.Thread(target=self._comprobar, name='descargas-estables', daemon=True)
+        self._hilo.start()
 
     def parar(self) -> None:
         self._parar.set()
         self._obs.stop()
+
+    def vivo(self) -> bool:
+        """¿Siguen en marcha los avisos de Windows y el hilo que espera a que acabe cada descarga?"""
+        return (self._hilo is not None and self._hilo.is_alive() and self._obs.is_alive()
+                and all(e.is_alive() for e in self._obs.emitters))
 
     def vigilar(self, ruta: str) -> None:
         if self.interesa(ruta):
@@ -72,31 +79,37 @@ class Vigilante(FileSystemEventHandler):
 
     def _comprobar(self) -> None:
         while not self._parar.wait(1):
-            ahora = time.time()
-            with self._lock:
-                candidatos = dict(self._candidatos)
-            for ruta, (tam, mtime, desde) in candidatos.items():
-                try:
-                    st = os.stat(ruta_larga(ruta))
-                except OSError:
-                    with self._lock:
-                        self._candidatos.pop(ruta, None)
-                    continue
-                if (st.st_size, st.st_mtime) != (tam, mtime):
-                    with self._lock:
-                        self._candidatos[ruta] = (st.st_size, st.st_mtime, ahora)
-                    continue
-                # Firefox crea el archivo vacío y descarga en «.part»: esperar a que este desaparezca.
-                if os.path.exists(ruta + '.part') or (st.st_size == 0 and ahora - desde < 30):
-                    continue
-                if ahora - desde < self.cfg.segundos_estable or not _se_puede_abrir(ruta):
-                    continue
+            try:
+                self._repasar()
+            except Exception:
+                log.exception('Error vigilando Descargas')
+
+    def _repasar(self) -> None:
+        ahora = time.time()
+        with self._lock:
+            candidatos = dict(self._candidatos)
+        for ruta, (tam, mtime, desde) in candidatos.items():
+            try:
+                st = os.stat(ruta_larga(ruta))
+            except OSError:
                 with self._lock:
                     self._candidatos.pop(ruta, None)
-                try:
-                    self.nueva(ruta)
-                except Exception:
-                    log.exception('Error con la descarga %s', ruta)
+                continue
+            if (st.st_size, st.st_mtime) != (tam, mtime):
+                with self._lock:
+                    self._candidatos[ruta] = (st.st_size, st.st_mtime, ahora)
+                continue
+            # Firefox crea el archivo vacío y descarga en «.part»: esperar a que este desaparezca.
+            if os.path.exists(ruta + '.part') or (st.st_size == 0 and ahora - desde < 30):
+                continue
+            if ahora - desde < self.cfg.segundos_estable or not _se_puede_abrir(ruta):
+                continue
+            with self._lock:
+                self._candidatos.pop(ruta, None)
+            try:
+                self.nueva(ruta)
+            except Exception:
+                log.exception('Error con la descarga %s', ruta)
 
 
 def _se_puede_abrir(ruta: str) -> bool:

@@ -54,18 +54,25 @@ class Aprendido:
             self._recargar()
             return [(k, self.reglas[(k[0], k[1].lower())]) for k in claves if (k[0], k[1].lower()) in self.reglas]
 
-    def aprender(self, reglas: dict[tuple[str, str], str]) -> None:
-        """Añade o cambia reglas, conservando el resto del archivo tal cual."""
-        if not reglas:
+    def regla(self, tipo: str, valor: str) -> str | None:
+        with self._lock:
+            self._recargar()
+            return self.reglas.get((tipo, valor.lower()))
+
+    def aprender(self, reglas: dict[tuple[str, str], str], olvidar=()) -> None:
+        """Añade o cambia reglas (y quita las de «olvidar»), conservando el resto del archivo tal cual."""
+        olvidar = {(t, c.lower()) for t, c in olvidar}
+        if not reglas and not olvidar:
             return
         if self.simulacion:
-            log.info('[simulación] aprendería: %s', reglas)
+            log.info('[simulación] aprendería: %s; olvidaría: %s', reglas, olvidar)
             return
         with self._lock:
             self._recargar()
             pendientes = {(t, c.lower()): d for (t, c), d in reglas.items()
                           if self.reglas.get((t, c.lower())) != d}
-            if not pendientes:
+            olvidar &= set(self.reglas)
+            if not pendientes and not olvidar:
                 return
             lineas = []
             if os.path.exists(self.archivo):
@@ -73,13 +80,18 @@ class Aprendido:
                     lineas = f.read().splitlines()
             else:
                 lineas = CABECERA.splitlines()
-            for i, linea in enumerate(lineas):
-                if (m := _LINEA.match(linea)) and (k := (m.group(1).lower(), m.group(2).lower())) in pendientes:
-                    lineas[i] = f'{k[0]} {k[1]} = {pendientes.pop(k)}'
+            nuevas = []
+            for linea in lineas:
+                m = _LINEA.match(linea)
+                k = (m.group(1).lower(), m.group(2).lower()) if m else None
+                if k in olvidar:
+                    continue
+                nuevas.append(f'{k[0]} {k[1]} = {pendientes.pop(k)}' if k in pendientes else linea)
             if pendientes:
-                lineas.append('')
-                lineas += [f'{t} {c} = {d}' for (t, c), d in pendientes.items()]
-            self._escribir(lineas)
+                if nuevas and nuevas[-1].strip() and not _LINEA.match(nuevas[-1]):
+                    nuevas.append('')                          # tras un comentario, una línea en blanco
+                nuevas += [f'{t} {c} = {d}' for (t, c), d in pendientes.items()]
+            self._escribir(nuevas)
             self._mtime = None
 
     def _escribir(self, lineas: list[str]) -> None:

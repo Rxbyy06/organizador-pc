@@ -17,11 +17,14 @@ simulacion = false
 ignorar = ['desktop.ini']
 # Segundos que el tamaño de una descarga debe estar quieto para darla por terminada.
 segundos_estable = 3
-# Webs que sirven para todo: de ellas no se aprende ninguna carpeta.
+# Webs que sirven para todo: de ellas no se aprende ninguna carpeta (ni se usa lo aprendido antes).
 webs_genericas = [
     'docs.google.com', 'drive.google.com', 'drive.usercontent.google.com',
     'mail.google.com', 'www.google.com', 'web.whatsapp.com', 'www.ilovepdf.com',
     'outlook.live.com', 'onedrive.live.com', 'github.com', 'codeload.github.com',
+    'claude.ai', 'chatgpt.com', 'chat.openai.com', 'gemini.google.com', 'notebooklm.google.com',
+    'copilot.microsoft.com', 'www.perplexity.ai', 'teams.microsoft.com', 'web.telegram.org',
+    'wetransfer.com', 'www.wetransfer.com',
 ]
 
 [indice]

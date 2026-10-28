@@ -82,6 +82,7 @@ class Words:
                                               rel TEXT, exportado TEXT, hash TEXT);
             CREATE TABLE IF NOT EXISTS pdfs (rel TEXT PRIMARY KEY, mtime REAL, decision TEXT, doc TEXT);
         ''')
+        self._filas = self._leer_filas()
 
     # ── Para el sincronizador ───────────────────────────────────────────────
     def excluidas(self) -> dict[str, set[str]]:
@@ -93,6 +94,11 @@ class Words:
         return res
 
     def filas(self) -> list[tuple]:
+        """Los Word tal como quedaron en la última pasada. No espera a la que esté en marcha (que puede tardar
+        minutos bajando de Drive): lo pregunta la ventana de cada descarga."""
+        return self._filas
+
+    def _leer_filas(self) -> list[tuple]:
         with self._lock:
             return self.db.execute('SELECT id, copia, nombre, ruta_doc, rel, exportado, hash FROM words').fetchall()
 
@@ -107,6 +113,7 @@ class Words:
                     log.exception('Copias Word de %s', cuenta['copia'])
                     inf.avisos.append(f'Copias Word de {cuenta["copia"]}: {e}')
             self.db.commit()
+        self._filas = self._leer_filas()
         try:
             self._buscar_pdfs(inf)
         except Exception:
@@ -201,10 +208,17 @@ class Words:
         destino = os.path.join(self.cfg.onedrive, rel)
         os.makedirs(ruta_larga(os.path.dirname(destino)), exist_ok=True)
         tmp = destino + TMP
-        shutil.copyfile(ruta_larga(origen), ruta_larga(tmp))
-        if os.path.exists(ruta_larga(destino)):
-            _escribible(destino)
-        os.replace(ruta_larga(tmp), ruta_larga(destino))
+        try:
+            shutil.copyfile(ruta_larga(origen), ruta_larga(tmp))
+            if os.path.exists(ruta_larga(destino)):
+                _escribible(destino)
+            os.replace(ruta_larga(tmp), ruta_larga(destino))
+        except BaseException:
+            try:                                         # el temporal a medias es nuestro: fuera
+                os.remove(ruta_larga(tmp))
+            except OSError:
+                pass
+            raise
         _solo_lectura(destino)
         h = huella(destino)
         if self.indice is not None:

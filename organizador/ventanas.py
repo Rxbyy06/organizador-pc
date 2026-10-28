@@ -1,33 +1,72 @@
-"""Ventanas: la de cada descarga, el selector de carpeta, Pendientes e Historial.
+"""Ventanas: la de cada descarga, Pendientes, Historial y las listas de rutas que usan todas.
 
-La revisión semanal de capturas está en ventanas_revision.py.
+La revisión semanal está en ventanas_revision.py; las del sincronizador, en ventanas_sincro.py.
 """
 import datetime
 import os
-import time
+import subprocess
 import tkinter as tk
-from tkinter import messagebox
+import tkinter.font as tkfont
+from tkinter import filedialog, ttk
 
 import customtkinter as ctk
 
-from . import carpetas as C
 from . import sistema
-from .nombres import libre, nfc, ruta_valida, sanear
+from .nombres import libre, ruta_valida, sanear
 
 NARANJA = ('#B35C00', '#F0A040')
 GRIS = ('#5F6368', '#A0A4A8')
 ROJO = ('#C62828', '#FF6B6B')
 VERDE = ('#2E7D32', '#7BC67E')
 FUENTE = 13
+_fuentes: dict = {}
 
 
 def fuente(tam=FUENTE, negrita=False):
-    return ctk.CTkFont(size=tam, weight='bold' if negrita else 'normal')
+    """Una sola por tamaño y grosor para todo el programa: crear una en cada etiqueta dejaba muchas por
+    liberar al cerrar cada ventana (y liberarlas desde otro hilo colgaba el programa: ver tk_hilos)."""
+    k = (tk._default_root, tam, negrita)
+    if k not in _fuentes:
+        _fuentes[k] = ctk.CTkFont(size=tam, weight='bold' if negrita else 'normal')
+    return _fuentes[k]
 
 
 def ruta_bonita(cfg, ruta: str) -> str:
     rel = cfg.relativa(ruta)
     return 'OneDrive' if rel == '.' else rel.replace(os.sep, '  ›  ')
+
+
+def carpeta_corta(cfg, ruta: str) -> str:
+    """La carpeta de un archivo para una lista: relativa a OneDrive (o entera si está fuera)."""
+    rel = cfg.relativa(os.path.dirname(ruta))
+    return 'OneDrive' if rel == '.' else rel
+
+
+def mostrar_en_explorador(ruta: str) -> None:
+    """Abre su carpeta en el Explorador con el archivo marcado (o la carpeta más cercana que exista)."""
+    ruta = os.path.normpath(ruta)
+    if os.path.exists(ruta):
+        subprocess.Popen(f'explorer /select,"{ruta}"')
+        return
+    while ruta and not os.path.isdir(ruta) and os.path.dirname(ruta) != ruta:
+        ruta = os.path.dirname(ruta)
+    if os.path.isdir(ruta):
+        os.startfile(ruta)
+
+
+def existente(carpeta: str) -> str:
+    """La carpeta, o la más cercana hacia arriba que ya exista."""
+    while carpeta and not os.path.isdir(carpeta) and os.path.dirname(carpeta) != carpeta:
+        carpeta = os.path.dirname(carpeta)
+    return carpeta
+
+
+def elegir_carpeta(padre, inicial: str, titulo: str) -> str | None:
+    """El selector de carpetas de Windows (el del Explorador), abierto en «inicial» o en lo más cercano que
+    exista. None si se cancela."""
+    elegida = filedialog.askdirectory(parent=padre, initialdir=existente(inicial) or None, title=titulo,
+                                      mustexist=False)
+    return os.path.normpath(elegida) if elegida else None
 
 
 def _tamano(ventana) -> tuple[int, int]:
@@ -62,11 +101,13 @@ def centrar(ventana, sobre=None) -> None:
 
 
 class Ventana(ctk.CTkToplevel):
-    def __init__(self, master, titulo: str):
+    def __init__(self, master, titulo: str, redimensionable: bool = False):
         super().__init__(master)
         self.withdraw()
         self.title(titulo)
-        self.resizable(False, False)
+        # Una sola vez: cada resizable() hace que customtkinter oculte y vuelva a enseñar la ventana un momento
+        # (para pintar la barra de título), y dos seguidos la dejan oculta para siempre.
+        self.resizable(redimensionable, redimensionable)
 
     def mostrar(self, donde='esquina', sobre=None, encima=True):
         colocar = (lambda: esquina(self)) if donde == 'esquina' else (lambda: centrar(self, sobre))
@@ -86,6 +127,144 @@ class Ventana(ctk.CTkToplevel):
             self._colocar()
 
 
+# ── Listas de rutas ─────────────────────────────────────────────────────────
+_estilos: dict = {}
+
+
+def _estilo_tablas(w) -> tuple[tkfont.Font, tkfont.Font, int]:
+    """Las listas son de ttk: con los colores y la letra de customtkinter (claro u oscuro, y a escala)."""
+    oscuro = ctk.get_appearance_mode() == 'Dark'
+    escala = ctk.ScalingTracker.get_widget_scaling(w)
+    k = (tk._default_root, oscuro, escala)
+    if k in _estilos:
+        return _estilos[k]
+    tema = ctk.ThemeManager.theme
+
+    def color(par):
+        return par[1] if oscuro else par[0]
+    familia = tema['CTkFont']['family']
+    letra = tkfont.Font(family=familia, size=-round(13 * escala))
+    negrita = tkfont.Font(family=familia, size=-round(13 * escala), weight='bold')
+    alto_fila = letra.metrics('linespace') + round(8 * escala)
+    fondo, texto = color(tema['CTkTextbox']['fg_color']), color(tema['CTkLabel']['text_color'])
+    s = ttk.Style(w)
+    if s.theme_use() != 'clam':
+        s.theme_use('clam')                     # el de Windows no deja cambiar los colores
+    s.configure('Rutas.Treeview', background=fondo, fieldbackground=fondo, foreground=texto, font=letra,
+                rowheight=alto_fila, borderwidth=0, relief='flat')
+    s.map('Rutas.Treeview', background=[('selected', color(tema['CTkButton']['fg_color']))],
+          foreground=[('selected', 'white')])
+    s.configure('Rutas.Treeview.Heading', background=color(tema['CTkFrame']['top_fg_color']), foreground=texto,
+                font=negrita, relief='flat', borderwidth=0, padding=(4, 3))
+    s.map('Rutas.Treeview.Heading', background=[('active', color(tema['CTkFrame']['fg_color']))])
+    s.layout('Rutas.Treeview', [('Treeview.treearea', {'sticky': 'nswe'})])      # sin marco
+    _estilos[k] = (letra, negrita, alto_fila)
+    return _estilos[k]
+
+
+class TablaRutas(ctk.CTkFrame):
+    """Lista de archivos con su ruta entera, como en el Explorador: el nombre primero (lo que distingue un
+    archivo de otro siempre se ve) y barras para desplazarse en horizontal y en vertical (Mayús + rueda,
+    en horizontal). Con «arbol», unas filas cuelgan de otras (los archivos de su carpeta).
+
+    columnas: [(título, ancho mínimo)]. Doble clic o Intro: al_abrir(valor de la fila).
+    La tabla tiene su propio tamaño (el de las columnas al mínimo y «alto» filas; más si se agranda la
+    ventana): unas columnas anchas no ensanchan la ventana, sacan la barra horizontal."""
+
+    def __init__(self, padre, columnas: list[tuple[str, int]], alto: int = 10, al_abrir=None,
+                 arbol: bool = False, varias: bool = False):
+        escala = ctk.ScalingTracker.get_widget_scaling(padre)
+        self.letra, self.negrita, alto_fila = _estilo_tablas(padre)
+        filas_px = alto * alto_fila + self.negrita.metrics('linespace') + round(12 * escala)
+        super().__init__(padre, fg_color='transparent', width=sum(m for _, m in columnas) + 20,
+                         height=round(filas_px / escala) + 20)
+        self.grid_propagate(False)
+        self.arbol, self.al_abrir, self.alto = arbol, al_abrir, alto
+        self.minimos = [round(m * escala) for _, m in columnas]
+        self.valores: dict[str, object] = {}
+        ids = [f'c{i}' for i in range(len(columnas))]
+        self.cols = ['#0'] + ids[1:] if arbol else ids
+        self.t = ttk.Treeview(self, columns=ids[1:] if arbol else ids, show='tree headings' if arbol else 'headings',
+                              height=alto, style='Rutas.Treeview', selectmode='extended' if varias else 'browse')
+        for c, (titulo, _), minimo in zip(self.cols, columnas, self.minimos):
+            self.t.heading(c, text=titulo, anchor='w')
+            self.t.column(c, width=minimo, minwidth=minimo, stretch=False, anchor='w')
+        xs = ctk.CTkScrollbar(self, orientation='horizontal', command=self.t.xview, height=16)
+        ys = ctk.CTkScrollbar(self, orientation='vertical', command=self.t.yview, width=16)
+
+        def vertical(a, b):                     # la vertical, solo si hay más filas de las que caben
+            ys.set(a, b)
+            if float(a) <= 0 and float(b) >= 1:
+                ys.grid_remove()
+            else:
+                ys.grid()
+        self.t.configure(xscrollcommand=xs.set, yscrollcommand=vertical)
+        self.t.grid(row=0, column=0, sticky='nsew')
+        ys.grid(row=0, column=1, sticky='ns')
+        xs.grid(row=1, column=0, sticky='ew')
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        modo = 1 if ctk.get_appearance_mode() == 'Dark' else 0
+        self.t.tag_configure('aviso', foreground=NARANJA[modo])
+        self.t.tag_configure('gris', foreground=GRIS[modo])
+        self.t.tag_configure('carpeta', font=self.negrita)
+        self.t.bind('<Double-1>', self._doble)
+        self.t.bind('<Return>', lambda e: self._abrir(self.t.focus()))
+        self.t.bind('<Shift-MouseWheel>', lambda e: self.t.xview_scroll(-3 if e.delta > 0 else 3, 'units'))
+
+    def anadir(self, textos: list[str], valor=None, padre: str = '', abierta: bool = False,
+               etiqueta: str | None = None) -> str:
+        """Una fila; «valor» es lo que reciben al_abrir y elegidos()."""
+        if self.arbol:
+            iid = self.t.insert(padre, 'end', text=textos[0], values=textos[1:], open=abierta,
+                                tags=(etiqueta,) if etiqueta else ())
+        else:
+            iid = self.t.insert('', 'end', values=textos, tags=(etiqueta,) if etiqueta else ())
+        self.valores[iid] = valor
+        return iid
+
+    def vaciar(self) -> None:
+        self.t.delete(*self.t.get_children())
+        self.valores.clear()
+
+    def quitar(self, iid: str) -> None:
+        if self.t.exists(iid):
+            self.t.delete(iid)
+        self.valores.pop(iid, None)
+
+    def ajustar(self) -> None:
+        """Cada columna, tan ancha como su texto más largo: lo que no cabe se ve con la barra horizontal."""
+        anchos = list(self.minimos)
+        pila = [(i, 0) for i in self.t.get_children()]
+        while pila:
+            iid, nivel = pila.pop()
+            item = self.t.item(iid)
+            letra = self.negrita if 'carpeta' in item['tags'] else self.letra
+            textos = ([item['text']] if self.arbol else []) + [str(v) for v in item['values']]
+            for n, texto in enumerate(textos):
+                extra = 30 + 20 * nivel if self.arbol and n == 0 else 16
+                anchos[n] = max(anchos[n], letra.measure(texto) + extra)
+            pila += [(h, nivel + 1) for h in self.t.get_children(iid)]
+        for c, ancho in zip(self.cols, anchos):
+            self.t.column(c, width=ancho, minwidth=ancho)
+
+    def elegidos(self) -> list:
+        return [self.valores[i] for i in self.t.selection() if self.valores.get(i) is not None]
+
+    def elegidas(self) -> list[str]:
+        """Las filas marcadas (sus identificadores)."""
+        return [i for i in self.t.selection() if self.valores.get(i) is not None]
+
+    def _doble(self, e):
+        iid = self.t.identify_row(e.y)
+        if iid and self.t.identify_region(e.x, e.y) != 'heading':
+            self._abrir(iid)
+
+    def _abrir(self, iid):
+        if iid and self.al_abrir and self.valores.get(iid) is not None:
+            self.al_abrir(self.valores[iid])
+
+
 # ── Ventana de cada descarga ────────────────────────────────────────────────
 class VentanaDescarga(Ventana):
     ANCHO = 600
@@ -94,6 +273,7 @@ class VentanaDescarga(Ventana):
         super().__init__(app.root, 'Nueva descarga')
         self.app, self.s, self.cfg = app, s, app.cfg
         self.carpeta = s.carpeta
+        self.cambiada = False                       # la ha elegido él con «Cambiar…»
         self.nombre_auto = s.nombre
         self.marcas: dict[tuple[str, str], tk.BooleanVar] = {}
         self.avisos = []
@@ -174,6 +354,11 @@ class VentanaDescarga(Ventana):
     def _carpeta_nueva(self) -> bool:
         return self.s.es_zip and self.descomprimir.get() and not self.s.zip.archivo_unico
 
+    def _sin_carpeta(self) -> bool:
+        """No sé dónde va (la raíz de OneDrive o de la uni) y aún no la ha elegido: antes de nada, que elija."""
+        raices = {os.path.normcase(os.path.normpath(r)) for r in (self.cfg.onedrive, self.cfg.ruta_uni)}
+        return not self.cambiada and os.path.normcase(os.path.normpath(self.carpeta)) in raices
+
     def _programar(self):
         if self._pendiente:
             self.after_cancel(self._pendiente)
@@ -205,12 +390,16 @@ class VentanaDescarga(Ventana):
         self.l_ext.configure(text=self.ext or '(carpeta)')
         nombre = self.e_nombre.get().strip()
         error = ruta_valida(os.path.join(self.carpeta, nombre + self.ext)) if nombre else 'el nombre está vacío'
+        descargas = os.path.normcase(os.path.normpath(self.cfg.descargas))
+        if os.path.normcase(self.carpeta) == descargas or os.path.normcase(self.carpeta).startswith(descargas + os.sep):
+            error = 'elige una carpeta fuera de Descargas'
         if error:
             self.l_error.configure(text=f'No vale: {error}')
             self.l_error.pack(fill='x', after=self.f_nombre)
         else:
             self.l_error.pack_forget()
-        self.b_aceptar.configure(state='disabled' if error else 'normal')
+        self.b_aceptar.configure(state='disabled' if error else 'normal',
+                                 text='Elegir carpeta…' if self._sin_carpeta() else 'Aceptar')
 
         self.avisos = self.app.sugeridor.avisos(s, self.carpeta, nombre, self.descomprimir.get()) if nombre else []
         for w in self.f_avisos.winfo_children():
@@ -231,17 +420,27 @@ class VentanaDescarga(Ventana):
 
     # Botones
     def cambiar(self):
-        SelectorCarpeta(self, self.app, self.carpeta, self._elegida)
+        carpeta = elegir_carpeta(self, self.carpeta, f'¿Dónde guardo «{os.path.basename(self.s.archivo)}»?')
+        if not self.winfo_exists():                 # se cerró mientras (p. ej., lo moviste tú a mano)
+            return
+        if carpeta:
+            self._elegida(carpeta)
+        self.lift()
+        self.e_nombre.focus_set()
 
     def _elegida(self, carpeta: str):
         editado = self.e_nombre.get().strip() != self.nombre_auto
         self.carpeta = carpeta
+        self.cambiada = True
         if not editado:
             self._poner_nombre(self.app.sugeridor.nombre_para(self.s, carpeta))
         self._refrescar()
 
     def aceptar(self):
         if self.b_aceptar.cget('state') == 'disabled':
+            return
+        if self._sin_carpeta():
+            self.cambiar()
             return
         nombre = sanear(self.e_nombre.get().strip())
         quitar, docs_a_borrar = [], []
@@ -255,7 +454,12 @@ class VentanaDescarga(Ventana):
                 docs_a_borrar.append(a.ruta)
         destino = os.path.join(self.carpeta, nombre + self.ext)
         if not self._carpeta_nueva() and os.path.exists(destino) and destino not in quitar:
-            nombre = libre(self.carpeta, nombre, self.ext)            # p. ej. guardar a propósito un idéntico
+            if not self.s.es_zip and self.app.sugeridor.es_igual(destino, self.s):
+                # Ya está ahí, idéntico: guardarlo otra vez solo crearía «… (2)». Lo que sobra es la descarga.
+                self.destroy()
+                self.app.descartar(self.s, ya_estaba=destino)
+                return
+            nombre = libre(self.carpeta, nombre, self.ext)            # mismo nombre, otro contenido: las dos
         self.destroy()
         self.app.aceptar(self.s, self.carpeta, nombre, self.descomprimir.get(), quitar, self.ext)
         for id_ in docs_a_borrar:
@@ -285,215 +489,165 @@ def _tam(n: int) -> str:
         n /= 1024
 
 
-# ── Selector de carpeta ─────────────────────────────────────────────────────
-class SelectorCarpeta(Ventana):
-    """Se abre en la carpeta sugerida, con sus hermanas. Las carpetas nuevas no se crean hasta «Aceptar»."""
-
-    def __init__(self, padre, app, inicial: str, al_elegir):
-        super().__init__(padre, 'Elegir carpeta')
-        self.app, self.cfg, self.al_elegir = app, app.cfg, al_elegir
-        self.raiz = os.path.normpath(self.cfg.onedrive)
-        self.virtuales: set[str] = {os.path.normcase(c) for c in _faltan(inicial)}
-        self.virtuales_ruta: dict[str, str] = {os.path.normcase(c): c for c in _faltan(inicial)}
-        self.actual = os.path.dirname(inicial) if os.path.normpath(inicial) != self.raiz else self.raiz
-        self.elegida = inicial
-        self.ultimo_clic = (None, 0.0)
-
-        cuerpo = ctk.CTkFrame(self, fg_color='transparent')
-        cuerpo.pack(fill='both', expand=True, padx=16, pady=14)
-        self.l_ruta = ctk.CTkLabel(cuerpo, text='', font=fuente(12, True), anchor='w', justify='left', wraplength=520)
-        self.l_ruta.pack(fill='x')
-        barra = ctk.CTkFrame(cuerpo, fg_color='transparent')
-        barra.pack(fill='x', pady=(6, 6))
-        self.b_subir = ctk.CTkButton(barra, text='↑ Subir', width=90, command=self.subir)
-        self.b_subir.pack(side='left')
-        ctk.CTkButton(barra, text='Nueva carpeta…', width=130, command=self.nueva).pack(side='left', padx=8)
-        ctk.CTkLabel(barra, text='Doble clic para entrar', font=fuente(11), text_color=GRIS).pack(side='right')
-        self.lista = ctk.CTkScrollableFrame(cuerpo, width=520, height=300)
-        self.lista.pack(fill='both', expand=True)
-        botones = ctk.CTkFrame(cuerpo, fg_color='transparent')
-        botones.pack(fill='x', pady=(10, 0))
-        self.b_elegir = ctk.CTkButton(botones, text='Elegir', width=200, command=self.elegir)
-        self.b_elegir.pack(side='left')
-        ctk.CTkButton(botones, text='Cancelar', width=100, fg_color='transparent', border_width=1,
-                      text_color=('gray10', 'gray90'), command=self.destroy).pack(side='left', padx=8)
-        self.bind('<Escape>', lambda e: self.destroy())
-        self._pintar()
-        self.mostrar('centro', padre)
-        self.grab_set()
-
-    def _hijas(self) -> list[tuple[str, bool]]:
-        """(ruta, es_nueva) de las subcarpetas de la carpeta actual."""
-        reales = [os.path.join(self.actual, d) for d in C.subcarpetas(self.actual)]
-        vistas = {os.path.normcase(r) for r in reales}
-        nuevas = [self.virtuales_ruta[v] for v in self.virtuales
-                  if os.path.normcase(os.path.dirname(self.virtuales_ruta[v])) == os.path.normcase(self.actual)
-                  and v not in vistas]
-        # Dentro de una asignatura se ofrecen también las categorías que aún no existen.
-        asig = C.asignatura_de(self.actual, self.cfg.ruta_uni)
-        if asig and os.path.normcase(self.actual) == os.path.normcase(asig.base()):
-            for cat in C.CATEGORIAS:
-                r = asig.categoria(cat)
-                if os.path.normcase(r) not in vistas and r not in nuevas:
-                    nuevas.append(r)
-        return sorted([(r, False) for r in reales] + [(r, True) for r in nuevas],
-                      key=lambda x: nfc(os.path.basename(x[0])).casefold())
-
-    def _pintar(self):
-        self.l_ruta.configure(text=ruta_bonita(self.cfg, self.actual))
-        self.b_subir.configure(state='disabled' if os.path.normcase(self.actual) == os.path.normcase(self.raiz)
-                               else 'normal')
-        for w in self.lista.winfo_children():
-            w.destroy()
-        for ruta, nueva in self._hijas():
-            elegida = os.path.normcase(ruta) == os.path.normcase(self.elegida)
-            texto = nfc(os.path.basename(ruta)) + ('   (nueva)' if nueva else '')
-            b = ctk.CTkButton(self.lista, text='📁  ' + texto, anchor='w', height=30, font=fuente(),
-                              fg_color=None if elegida else 'transparent',
-                              text_color=('white', 'white') if elegida else (GRIS if nueva else ('gray10', 'gray90')),
-                              hover_color=('gray80', 'gray30') if not elegida else None,
-                              command=lambda r=ruta: self._clic(r))
-            b.pack(fill='x', pady=1)
-        if not self._hijas():
-            ctk.CTkLabel(self.lista, text='(sin subcarpetas)', text_color=GRIS).pack(pady=10)
-        self.b_elegir.configure(text=f'Elegir «{_corto(os.path.basename(self.elegida) or "OneDrive")}»')
-
-    def _clic(self, ruta: str):
-        ahora = time.time()
-        if self.ultimo_clic[0] == ruta and ahora - self.ultimo_clic[1] < 0.45:
-            self.actual = ruta                    # doble clic: entrar
-        self.elegida = ruta
-        self.ultimo_clic = (ruta, ahora)
-        self._pintar()
-
-    def subir(self):
-        if os.path.normcase(self.actual) != os.path.normcase(self.raiz):
-            self.elegida = self.actual
-            self.actual = os.path.dirname(self.actual)
-            self._pintar()
-
-    def nueva(self):
-        if os.path.normcase(self.actual) == os.path.normcase(self.cfg.ruta_uni):
-            pista = 'Asignatura nueva, con el estilo «2n - T2 - Nom en català»:'
-        else:
-            pista = 'Nombre de la carpeta nueva:'
-        d = ctk.CTkInputDialog(text=pista, title='Nueva carpeta')
-        d.after(50, d.lift)
-        nombre = d.get_input()
-        if not nombre or not nombre.strip():
-            return
-        ruta = os.path.join(self.actual, sanear(nombre.strip()))
-        if err := ruta_valida(ruta):
-            messagebox.showerror('Nombre no válido', f'No vale: {err}', parent=self)
-            return
-        self.virtuales.add(os.path.normcase(ruta))
-        self.virtuales_ruta[os.path.normcase(ruta)] = ruta
-        self.elegida = self.actual = ruta
-        self._pintar()
-
-    def elegir(self):
-        self.grab_release()
-        self.destroy()
-        self.al_elegir(self.elegida)
-
-
 def _corto(t: str, n: int = 32) -> str:
     return t if len(t) <= n else t[:n - 1] + '…'
+
+
+def _boton_secundario(padre, texto, orden, ancho=100):
+    return ctk.CTkButton(padre, text=texto, width=ancho, fg_color='transparent', border_width=1,
+                         text_color=('gray10', 'gray90'), command=orden)
 
 
 # ── Pendientes ──────────────────────────────────────────────────────────────
 class VentanaPendientes(Ventana):
     def __init__(self, app):
-        super().__init__(app.root, 'Pendientes de Descargas')
+        super().__init__(app.root, 'Pendientes de Descargas', redimensionable=True)
         self.app = app
         cuerpo = ctk.CTkFrame(self, fg_color='transparent')
         cuerpo.pack(fill='both', expand=True, padx=16, pady=14)
         ctk.CTkLabel(cuerpo, text='Pendientes en Descargas', font=fuente(16, True), anchor='w').pack(fill='x')
-        ctk.CTkLabel(cuerpo, text=f'Lo que sigue en Descargas. «Organizar» abre la ventanita otra vez. A los '
-                                  f'{app.cfg.dias_descargas:g} días de llegar, va a la Papelera (con un día de aviso).',
-                     font=fuente(12), text_color=GRIS, anchor='w', justify='left', wraplength=600).pack(fill='x', pady=(0, 8))
-        self.lista = ctk.CTkScrollableFrame(cuerpo, width=600, height=320)
-        self.lista.pack(fill='both', expand=True)
+        ctk.CTkLabel(cuerpo, text=f'Lo que sigue en Descargas. «Organizar» (o doble clic) abre la ventanita otra vez. '
+                                  f'A los {app.cfg.dias_descargas:g} días de llegar, va a la Papelera (con un día de aviso).',
+                     font=fuente(12), text_color=GRIS, anchor='w', justify='left', wraplength=640).pack(fill='x', pady=(0, 8))
+        self.tabla = TablaRutas(cuerpo, [('A la Papelera', 130), ('Llegó', 70), ('Archivo', 420)], alto=12,
+                                al_abrir=self._abrir, varias=True)
+        self.tabla.pack(fill='both', expand=True)
+        self.l_vacio = ctk.CTkLabel(cuerpo, text='Descargas está al día.', text_color=GRIS)
         botones = ctk.CTkFrame(cuerpo, fg_color='transparent')
         botones.pack(fill='x', pady=(10, 0))
-        ctk.CTkButton(botones, text='Abrir Descargas', width=140,
-                      command=lambda: os.startfile(app.cfg.descargas)).pack(side='left')
-        ctk.CTkButton(botones, text='Cerrar', width=100, fg_color='transparent', border_width=1,
-                      text_color=('gray10', 'gray90'), command=self.destroy).pack(side='right')
+        ctk.CTkButton(botones, text='Organizar', width=110, command=self._organizar).pack(side='left')
+        _boton_secundario(botones, 'Abrir', self._abrir_elegidos, 90).pack(side='left', padx=8)
+        _boton_secundario(botones, 'Abrir Descargas', lambda: os.startfile(app.cfg.descargas), 140).pack(side='left')
+        _boton_secundario(botones, 'Cerrar', self.destroy).pack(side='right')
         self.bind('<Escape>', lambda e: self.destroy())
         self.pintar()
         self.mostrar('centro', encima=False)
 
     def pintar(self):
-        for w in self.lista.winfo_children():
-            w.destroy()
-        filas = self.app.pendientes()
-        if not filas:
-            ctk.CTkLabel(self.lista, text='Descargas está al día.', text_color=GRIS).pack(pady=20)
+        antes = set(self.tabla.elegidos())
+        self.tabla.vaciar()
         aviso = self.app.cfg.dias_aviso * 86400
-        for ruta, _desde, quedan in filas:
-            f = ctk.CTkFrame(self.lista, fg_color='transparent')
-            f.pack(fill='x', pady=2)
+        filas = self.app.pendientes()
+        for ruta, desde, quedan in filas:
             dias = max(0, int(-(-quedan // 86400)))        # redondeo hacia arriba
             if quedan <= aviso:
-                cuando, color = ('a la Papelera hoy' if dias == 0 else 'a la Papelera mañana'), NARANJA
+                cuando = 'hoy' if dias == 0 else 'mañana'
             else:
-                cuando, color = f'a la Papelera en {dias} días', GRIS
-            carpeta = os.path.isdir(ruta)
-            ctk.CTkLabel(f, text=('📁 ' if carpeta else '') + _corto(os.path.basename(ruta), 46), font=fuente(),
-                         anchor='w').pack(side='left')
-            if carpeta:
-                ctk.CTkButton(f, text='Abrir', width=90, command=lambda r=ruta: os.startfile(r)).pack(side='right')
-            else:
-                ctk.CTkButton(f, text='Organizar', width=90, command=lambda r=ruta: self._organizar(r)).pack(side='right')
-            ctk.CTkLabel(f, text=cuando, font=fuente(11), text_color=color).pack(side='right', padx=10)
+                cuando = f'en {dias} días'
+            nombre = os.path.basename(ruta) + ('  (carpeta)' if os.path.isdir(ruta) else '')
+            iid = self.tabla.anadir([cuando, f'{datetime.datetime.fromtimestamp(desde):%d/%m}', nombre], ruta,
+                                    etiqueta='aviso' if quedan <= aviso else None)
+            if ruta in antes:
+                self.tabla.t.selection_add(iid)
+        self.tabla.ajustar()
+        if filas:
+            self.l_vacio.pack_forget()
+        else:
+            self.l_vacio.pack(pady=(8, 0), before=self.tabla)
 
-    def _organizar(self, ruta):
-        self.app.organizar(ruta)
+    def _abrir(self, ruta):
+        """Doble clic: un archivo se organiza; una carpeta se abre."""
+        if os.path.isdir(ruta):
+            os.startfile(ruta)
+        else:
+            self._organizar([ruta])
+
+    def _abrir_elegidos(self):
+        for ruta in self.tabla.elegidos():
+            if os.path.exists(ruta):
+                os.startfile(ruta)
+
+    def _organizar(self, rutas=None):
+        for ruta in reversed(rutas or self.tabla.elegidos()):      # (se ponen delante de la cola)
+            if os.path.isfile(ruta):
+                self.app.organizar(ruta)
         self.after(500, self.pintar)
 
 
 # ── Historial ───────────────────────────────────────────────────────────────
 class VentanaHistorial(Ventana):
+    ESTADOS = {'hecho': 'hecho', 'deshecho': 'deshecho', 'simulado': 'simulación', 'error': 'falló', 'nota': 'en Drive'}
+
     def __init__(self, app):
-        super().__init__(app.root, 'Historial del Organizador')
+        super().__init__(app.root, 'Historial del Organizador', redimensionable=True)
         self.app = app
         cuerpo = ctk.CTkFrame(self, fg_color='transparent')
         cuerpo.pack(fill='both', expand=True, padx=16, pady=14)
         ctk.CTkLabel(cuerpo, text='Historial', font=fuente(16, True), anchor='w').pack(fill='x')
-        ctk.CTkLabel(cuerpo, text=f'Lo que ha hecho el programa en los últimos {app.cfg.dias_historial} días. '
-                                  '«Deshacer» lo devuelve como estaba (lo enviado a la Papelera se recupera de allí).',
-                     font=fuente(12), text_color=GRIS, anchor='w', justify='left', wraplength=680).pack(fill='x', pady=(0, 8))
-        self.lista = ctk.CTkScrollableFrame(cuerpo, width=680, height=380)
-        self.lista.pack(fill='both', expand=True)
-        ctk.CTkButton(cuerpo, text='Cerrar', width=100, fg_color='transparent', border_width=1,
-                      text_color=('gray10', 'gray90'), command=self.destroy).pack(side='right', pady=(10, 0))
+        ctk.CTkLabel(cuerpo, text=f'Lo que ha hecho el programa en los últimos {app.cfg.dias_historial} días. Marca una '
+                                  'fila: «Deshacer» la devuelve como estaba (lo enviado a la Papelera se recupera de allí) '
+                                  'y «Ver archivos» (o doble clic) enseña cada archivo con su ruta entera.',
+                     font=fuente(12), text_color=GRIS, anchor='w', justify='left', wraplength=760).pack(fill='x', pady=(0, 8))
+        self.tabla = TablaRutas(cuerpo, [('Cuándo', 96), ('Estado', 90), ('Qué ha hecho', 560)], alto=16,
+                                al_abrir=self._ver)
+        self.tabla.pack(fill='both', expand=True)
+        botones = ctk.CTkFrame(cuerpo, fg_color='transparent')
+        botones.pack(fill='x', pady=(10, 0))
+        self.b_deshacer = ctk.CTkButton(botones, text='Deshacer', width=110, command=self._deshacer)
+        self.b_deshacer.pack(side='left')
+        self.b_ver = _boton_secundario(botones, 'Ver archivos', lambda: self._ver(), 120)
+        self.b_ver.pack(side='left', padx=8)
+        _boton_secundario(botones, 'Cerrar', self.destroy).pack(side='right')
+        self.tabla.t.bind('<<TreeviewSelect>>', lambda e: self._botones())
         self.bind('<Escape>', lambda e: self.destroy())
         self.pintar()
         self.mostrar('centro', encima=False)
 
     def pintar(self):
-        for w in self.lista.winfo_children():
-            w.destroy()
-        filas = self.app.historial.lista()
-        if not filas:
-            ctk.CTkLabel(self.lista, text='Aún no hay nada.', text_color=GRIS).pack(pady=20)
-        for id_, fecha, _tipo, descripcion, estado in filas:
-            f = ctk.CTkFrame(self.lista, fg_color='transparent')
-            f.pack(fill='x', pady=3)
-            ctk.CTkLabel(f, text=datetime.datetime.fromtimestamp(fecha).strftime('%d/%m %H:%M'), width=80,
-                         font=fuente(11), text_color=GRIS, anchor='nw').pack(side='left', anchor='n')
-            if estado == 'hecho':
-                ctk.CTkButton(f, text='Deshacer', width=86, command=lambda i=id_: self._deshacer(i)).pack(
-                    side='right', anchor='n')
-            else:
-                etiqueta = {'deshecho': 'deshecho', 'simulado': 'simulación', 'error': 'falló',
-                            'nota': 'en Drive'}.get(estado, estado)
-                ctk.CTkLabel(f, text=etiqueta, width=86, font=fuente(11),
-                             text_color=ROJO if estado == 'error' else GRIS).pack(side='right', anchor='n')
-            ctk.CTkLabel(f, text=descripcion, font=fuente(12), anchor='w', justify='left',
-                         wraplength=480, text_color=GRIS if estado == 'deshecho' else ('gray10', 'gray90')).pack(
-                side='left', fill='x', expand=True, padx=6)
+        self.tabla.vaciar()
+        for id_, fecha, _tipo, descripcion, estado in self.app.historial.lista():
+            self.tabla.anadir([datetime.datetime.fromtimestamp(fecha).strftime('%d/%m %H:%M'),
+                               self.ESTADOS.get(estado, estado), descripcion], (id_, estado, descripcion),
+                              etiqueta='aviso' if estado == 'error' else 'gris' if estado == 'deshecho' else None)
+        self.tabla.ajustar()
+        self._botones()
 
-    def _deshacer(self, id_):
-        self.app.deshacer(id_, al_terminar=self.pintar)
+    def _botones(self):
+        elegido = self.tabla.elegidos()
+        self.b_deshacer.configure(state='normal' if elegido and elegido[0][1] == 'hecho' else 'disabled')
+        self.b_ver.configure(state='normal' if elegido else 'disabled')
+
+    def _deshacer(self):
+        for id_, estado, _ in self.tabla.elegidos():
+            if estado == 'hecho':
+                self.app.deshacer(id_, al_terminar=self.pintar)
+
+    def _ver(self, valor=None):
+        elegido = [valor] if valor else self.tabla.elegidos()
+        if elegido:
+            id_, _, descripcion = elegido[0]
+            VentanaArchivos(self, self.app, descripcion, self.app.historial.pasos(id_)[0])
+
+
+class VentanaArchivos(Ventana):
+    """Cada archivo de una acción del historial, con su ruta entera. Doble clic: mostrarlo en el Explorador."""
+    QUE = {'mover': 'Movido', 'papelera': 'A la Papelera', 'crear_carpeta': 'Carpeta nueva', 'extraer': 'Descomprimido'}
+
+    def __init__(self, padre, app, descripcion: str, pasos: list[dict]):
+        super().__init__(padre, 'Archivos', redimensionable=True)
+        cfg = app.cfg
+        cuerpo = ctk.CTkFrame(self, fg_color='transparent')
+        cuerpo.pack(fill='both', expand=True, padx=16, pady=14)
+        ctk.CTkLabel(cuerpo, text=descripcion, font=fuente(12), anchor='w', justify='left',
+                     wraplength=760).pack(fill='x', pady=(0, 8))
+        tabla = TablaRutas(cuerpo, [('Qué', 100), ('Archivo', 240), ('Carpeta', 260), ('Antes estaba en', 160)],
+                           alto=14, al_abrir=mostrar_en_explorador)
+        tabla.pack(fill='both', expand=True)
+        for p in pasos:
+            que = self.QUE.get(p.get('op'), p.get('op', ''))
+            if p.get('op') == 'mover':
+                tabla.anadir([que, os.path.basename(p['a']), carpeta_corta(cfg, p['a']), cfg.relativa(p['de'])], p['a'])
+            elif p.get('op') == 'extraer':
+                for f in p.get('archivos', []):
+                    tabla.anadir([que, os.path.basename(f), carpeta_corta(cfg, f), os.path.basename(p['zip'])], f)
+            elif p.get('ruta'):
+                nombre = os.path.basename(p['ruta']) + (os.sep if p.get('op') == 'crear_carpeta' else '')
+                tabla.anadir([que, nombre, carpeta_corta(cfg, p['ruta']), ''], p['ruta'])
+        if not pasos:
+            tabla.anadir(['', 'Esta acción no tiene archivos que enseñar', '', ''])
+        tabla.ajustar()
+        ctk.CTkLabel(cuerpo, text='Doble clic en una fila: abrir su carpeta en el Explorador.', font=fuente(11),
+                     text_color=GRIS, anchor='w').pack(fill='x', pady=(6, 0))
+        _boton_secundario(cuerpo, 'Cerrar', self.destroy).pack(side='right', pady=(8, 0))
+        self.bind('<Escape>', lambda e: self.destroy())
+        self.mostrar('centro', padre, encima=False)

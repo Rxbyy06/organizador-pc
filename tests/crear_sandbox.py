@@ -67,6 +67,11 @@ def crear(destino: str) -> None:
     assert r"G:\Mi unidad" not in texto and r"H:\Mi unidad" not in texto
     texto = re.sub(r"(?m)^carpetas = \['C:\\Users\\[^\\]+\\OneDrive\\Im.*$",
                    lambda m: f"carpetas = ['{destino}\\Capturas de pantalla', '{destino}\\Captures']", texto)
+    # La copia semanal, también dentro (hasta el 28-10-2026 se escapaba a la carpeta de copias de verdad).
+    texto = re.sub(r"(?m)^carpeta = '.*'$", lambda m: f"carpeta = '{destino}\\Copias'", texto)
+    fuera = [linea for linea in texto.splitlines()
+             if not linea.lstrip().startswith('#') and re.search(r"'[A-Za-z]:\\", linea) and destino not in linea]
+    assert not fuera, f'la config de pruebas aún apunta a carpetas de verdad: {fuera}'
     texto += "\n[programa]\ndatos = 'datos'\naprendido = 'aprendido.txt'\n"
     with open(os.path.join(destino, 'config.toml'), 'w', encoding='utf-8') as f:
         f.write(texto)

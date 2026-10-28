@@ -80,8 +80,14 @@ def destinos(z: InfoZip, carpeta: str, nombre: str) -> list[tuple[zipfile.ZipInf
 
 
 def extraer(ruta_zip: str, info: zipfile.ZipInfo, destino: str) -> None:
+    """Nunca pisa nada ('xb'); si falla a medias, quita el trozo que llegó a escribir (lo demás lo deshace quien llama)."""
     os.makedirs(ruta_larga(os.path.dirname(destino)), exist_ok=True)
-    with zipfile.ZipFile(ruta_larga(ruta_zip)) as f, f.open(info) as src, \
-            open(ruta_larga(destino), 'xb') as dst:
-        while bloque := src.read(1 << 20):
-            dst.write(bloque)
+    with zipfile.ZipFile(ruta_larga(ruta_zip)) as f, f.open(info) as src:
+        with open(ruta_larga(destino), 'xb') as dst:
+            try:
+                while bloque := src.read(1 << 20):
+                    dst.write(bloque)
+            except BaseException:
+                dst.close()
+                os.remove(ruta_larga(destino))
+                raise

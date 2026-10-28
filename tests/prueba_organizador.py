@@ -190,9 +190,9 @@ def guion(app):
         descargar('D')
         v, carpeta, nombre, ext, avisos, _ = ventana('P3.zip')
         ok(carpeta.endswith(r'1r - T3 - Xarxes\4 - Prácticas'), 'D: carpeta de la tarea conocida (Xarxes › Prácticas)')
-        ok(nombre == 'P3' and ext == '', 'D: se descomprime en una carpeta «P3»')
+        ok(nombre == 'Práctica 3' and ext == '', f'D: se descomprime en una carpeta con las normas: «{nombre}»')
         ui(v.aceptar)
-        dest_d = os.path.join(carpeta, 'P3')
+        dest_d = os.path.join(carpeta, 'Práctica 3')
         ok(esperar(lambda: os.path.exists(os.path.join(dest_d, 'main.c'))), 'D: descomprimido')
         nombres = os.listdir(dest_d) if os.path.isdir(dest_d) else []
         ok('Pràctica 3 - Enunciat.txt' in nombres and all(unicodedata.is_normalized('NFC', n) for n in nombres),

@@ -68,6 +68,8 @@ def main():
     A.configurar_registro(cfg)
     app = A.App(cfg)
     h = app.historial
+    h.poner_estado('ultima_revision', 0)          # que toque la revisión aunque otra prueba ya la hiciera
+    h.poner_estado('revision_pospuesta', 0)
     h.descarga_nueva('instalador-viejo.exe', presentado=True, cuando=time.time() - 6.5 * DIA)
     h.descarga_nueva('horario.pdf', presentado=True)
     avisos = []

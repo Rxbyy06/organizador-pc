@@ -5,16 +5,16 @@ import logging
 import logging.handlers
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
 import traceback
 from collections import deque
-from tkinter import messagebox
 
 import customtkinter as ctk
 
-from . import aprendizaje, config, sistema
+from . import aprendizaje, config, sistema, tk_hilos
 from .acciones import Ejecutor, Historial
 from .docs_word import Words
 from .bandeja import Bandeja
@@ -33,12 +33,17 @@ from .ventanas_sincro import VentanaBorrados, VentanaPDF
 
 log = logging.getLogger('organizador')
 SEGUNDOS_CUELGUE = 30          # sin responder más que esto: se apunta en datos\cuelgues.log
+SEGUNDOS_REINICIO = 120        # y si sigue así, el programa se reinicia solo
+MAX_REINICIOS = 3              # reinicios solos seguidos; después solo se apunta (que no entre en bucle)
 VIGIA_CADA = 5                 # cada cuánto mira el vigía
+REPASO_DESCARGAS = 300         # cada cuánto se repasa Descargas por si se perdió el aviso de alguna
+HILOS = ('indice', 'sincro', 'bandeja', 'bandeja-estado')     # y los del vigilante de Descargas
 
 
 class App:
-    def __init__(self, cfg):
+    def __init__(self, cfg, reinicios: int = 0):
         self.cfg = cfg
+        self.reinicios = reinicios                      # cuántas veces seguidas se ha reiniciado solo
         self.historial = Historial(cfg)
         self.indice = Indice(cfg)
         self.perfil = Perfil()
@@ -56,6 +61,7 @@ class App:
         self._pdfs_vistos: set[str] = set()
         self.bandeja = Bandeja(self)
 
+        tk_hilos.instalar()
         ctk.set_appearance_mode('system')
         self.root = ctk.CTk()
         self.root.withdraw()
@@ -65,7 +71,8 @@ class App:
         self._cola_ui: queue.Queue = queue.Queue()
         self.por_mostrar: deque[str] = deque()
         self.ventana: VentanaDescarga | None = None
-        self.preparando = False
+        self.preparando: str | None = None              # la descarga cuya ventana se está preparando
+        self.preparando_semana = False
         self.mostradas = 0
         self.pausa_hasta = 0.0
         self.ventanas_aux: dict[str, object] = {}
@@ -85,29 +92,39 @@ class App:
         self._cola_ui.put(f)
 
     def _bucle_ui(self) -> None:
+        """Cada 0,3 s, en el hilo de las ventanas: lo que piden los demás hilos y la siguiente descarga."""
         self._latido = time.monotonic()
+        self.root.after(300, self._bucle_ui)            # lo primero: pase lo que pase abajo, el bucle sigue
+        tk_hilos.vaciar()
+        while True:
+            try:
+                f = self._cola_ui.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                f()
+            except Exception:
+                log.exception('Error en la interfaz')
         try:
-            while True:
-                self._cola_ui.get_nowait()()
-        except queue.Empty:
-            pass
+            self._quizas_mostrar()
         except Exception:
-            log.exception('Error en la interfaz')
-        self._quizas_mostrar()
-        self.root.after(300, self._bucle_ui)
+            log.exception('Error al preparar la siguiente descarga')
 
     def _hilo_vigia(self) -> None:
-        """Si la interfaz deja de responder, apunta en datos\\cuelgues.log en qué estaba cada hilo.
+        """Vigila que el programa siga vivo.
 
-        Si ni siquiera este hilo puede correr (Python entero bloqueado), lo apunta faulthandler, que no
-        necesita a Python: se rearma en cada vuelta y solo salta si nadie lo rearma en el doble de tiempo."""
+        Si la interfaz deja de responder, apunta en datos\\cuelgues.log en qué estaba cada hilo; si sigue
+        así (o se ha parado un hilo de fondo), reinicia el programa. Si ni siquiera este hilo puede correr
+        (Python entero bloqueado), lo apunta faulthandler, que no necesita a Python: se rearma en cada
+        vuelta y solo salta si nadie lo rearma en el doble de tiempo. De paso, repasa Descargas cada
+        5 minutos por si el aviso de Windows de alguna descarga se perdió."""
         ruta = os.path.join(self.cfg.datos, 'cuelgues.log')
         try:
             f = open(ruta, 'a', encoding='utf-8')
         except OSError:
             log.exception('No puedo abrir %s', ruta)
             return
-        apuntado, antes = False, time.time()
+        apuntado, sin_reinicio, antes, repaso = False, False, time.time(), time.monotonic()
         while not self._parar.wait(VIGIA_CADA):
             if time.time() - antes > VIGIA_CADA + 25:  # el PC estuvo en suspensión: no es un cuelgue
                 self._latido = time.monotonic()
@@ -122,25 +139,65 @@ class App:
                 faulthandler.dump_traceback(file=f, all_threads=True)
             elif parada <= SEGUNDOS_CUELGUE:
                 apuntado = False
+            try:
+                muertos = self._hilos_parados()
+            except Exception:                           # el vigía no puede caerse por mirar
+                log.exception('No pude mirar los hilos')
+                muertos = []
+            if (parada > SEGUNDOS_REINICIO or muertos) and not self._parar.is_set():
+                motivo = (f'la interfaz lleva {parada:.0f} s sin responder' if parada > SEGUNDOS_REINICIO
+                          else f'se ha parado el hilo «{", ".join(muertos)}»')
+                if self.reinicios < MAX_REINICIOS:
+                    f.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")}: reinicio automático: {motivo}\n')
+                    f.flush()
+                    self._reiniciar(motivo)
+                elif not sin_reinicio:
+                    sin_reinicio = True
+                    log.error('%s, pero ya me he reiniciado %d veces seguidas: no lo vuelvo a hacer', motivo,
+                              self.reinicios)
+            if time.monotonic() - repaso > REPASO_DESCARGAS:
+                repaso = time.monotonic()
+                self.en_ui(self._revisar_descargas)
         faulthandler.cancel_dump_traceback_later()
         f.close()
+
+    def _hilos_parados(self) -> list[str]:
+        vivos = {t.name for t in threading.enumerate()}
+        return [n for n in HILOS if n not in vivos] + ([] if self.vigilante.vivo() else ['descargas'])
+
+    def _reiniciar(self, motivo: str) -> None:
+        """Último recurso, desde el vigía: abre otra vez el programa y cierra este, que no puede seguir.
+
+        La copia nueva espera a que esta termine antes de arrancar. Lo que se sincronizaba no queda a medias:
+        cada archivo se copia a un temporal y se pone en su sitio de una vez."""
+        log.error('Reinicio automático: %s', motivo)
+        orden = [sys.executable, os.path.join(config.RAIZ, 'organizador.pyw'), '--config', self.cfg.archivo,
+                 '--esperar', str(os.getpid()), '--reinicios', str(self.reinicios + 1)]
+        try:
+            subprocess.Popen(orden, cwd=config.RAIZ, close_fds=True,
+                             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+        except OSError:
+            log.exception('No pude reiniciar el programa')
+            return
+        logging.shutdown()
+        os._exit(3)
 
     def _error_ui(self, tipo, valor, tb):
         log.error('Error en la interfaz: %s', ''.join(traceback.format_exception(tipo, valor, tb)))
 
     def ejecutar(self, trabajo, al_terminar=None, que='') -> None:
-        """Trabajo en segundo plano; al terminar, el resultado (o el error) vuelve a la interfaz."""
+        """Trabajo en segundo plano; al terminar, el resultado vuelve a la interfaz (y el error, en un aviso)."""
         def hilo():
             try:
                 r = trabajo()
             except Exception as e:
                 log.exception('Falló: %s', que)
-                self.en_ui(lambda: messagebox.showerror('Organizador del PC', f'No se pudo {que}:\n\n{e}'))
+                self.bandeja.notificar('Organizador del PC', f'No se pudo {que}: {e}')
                 r = None
             if al_terminar:
                 self.en_ui(lambda: al_terminar(r))
-            self.en_ui(self.bandeja.actualizar)
-        threading.Thread(target=hilo, daemon=True).start()
+            self.bandeja.actualizar()
+        threading.Thread(target=hilo, name='trabajo', daemon=True).start()
 
     # ── Descargas ───────────────────────────────────────────────────────────
     def _llega(self, ruta: str) -> None:
@@ -157,7 +214,7 @@ class App:
         self.en_ui(lambda: self._quitar_de_cola(ruta))
 
     def _encolar(self, ruta: str, primero: bool = False) -> None:
-        if ruta in self.por_mostrar or (self.ventana and self.ventana.s.archivo == ruta):
+        if ruta in self.por_mostrar or ruta == self.preparando or (self.ventana and self.ventana.s.archivo == ruta):
             return
         (self.por_mostrar.appendleft if primero else self.por_mostrar.append)(ruta)
         self.bandeja.actualizar()
@@ -183,7 +240,7 @@ class App:
         ruta = self.por_mostrar.popleft()
         if not os.path.exists(ruta):
             return
-        self.preparando = True
+        self.preparando = ruta
 
         def preparar():
             s = self.sugeridor.sugerir(ruta)
@@ -192,7 +249,7 @@ class App:
             return s
 
         def abrir(s):
-            self.preparando = False
+            self.preparando = None
             if s is None or not os.path.exists(ruta):
                 return
             self.mostradas += 1
@@ -219,10 +276,10 @@ class App:
             log.info('[simulación] «%s»: más tarde', os.path.basename(s.archivo))
         self.bandeja.actualizar()
 
-    def descartar(self, s) -> None:
+    def descartar(self, s, ya_estaba: str | None = None) -> None:
         self._cerrada()
         self.historial.descarga_nueva(os.path.basename(s.archivo), presentado=True)
-        self.ejecutar(lambda: self.ejecutor.descartar(s), que=f'descartar «{os.path.basename(s.archivo)}»')
+        self.ejecutar(lambda: self.ejecutor.descartar(s, ya_estaba), que=f'descartar «{os.path.basename(s.archivo)}»')
 
     def organizar(self, ruta: str) -> None:
         """Desde Pendientes: volver a abrir la ventanita de un archivo."""
@@ -302,22 +359,36 @@ class App:
         return p
 
     def abrir_semana(self, auto: bool) -> None:
-        """Los lunes (o cuando la pides): pestaña «Resumen» y, si hay capturas viejas, «Capturas»."""
+        """Los lunes (o cuando la pides): pestaña «Resumen» y, si hay capturas viejas, «Capturas».
+
+        Los datos (que recorren OneDrive y el índice) se preparan en segundo plano."""
         v = self.ventanas_aux.get('revision')
         if v is not None and v.winfo_exists():
             v.deiconify()
             v.lift()
             return
-        if not self.espacio:
-            self.espacio = espacio.medir(self.cfg)
-        capturas = self.revision.pendientes()
-        d = self.resumen.datos(self.pendientes_resumen(), len(capturas), self.espacio)
-        if auto and not d.notable:
-            self.bandeja.notificar('Revisión semanal', 'Semana sin novedades: todo en orden.')
-            self.resumen.hecho(d)
-            self.revision.hecha()
+        if self.preparando_semana:
             return
-        self.ventanas_aux['revision'] = VentanaSemanal(self, d, capturas)
+        self.preparando_semana = True
+
+        def preparar():
+            if not self.espacio:
+                self.espacio = espacio.medir(self.cfg)
+            capturas = self.revision.pendientes()
+            return self.resumen.datos(self.pendientes_resumen(), len(capturas), self.espacio), capturas
+
+        def abrir(r):
+            self.preparando_semana = False
+            if r is None:
+                return
+            d, capturas = r
+            if auto and not d.notable:
+                self.bandeja.notificar('Revisión semanal', 'Semana sin novedades: todo en orden.')
+                self.resumen.hecho(d)
+                self.revision.hecha()
+                return
+            self.ventanas_aux['revision'] = VentanaSemanal(self, d, capturas)
+        self.ejecutar(preparar, abrir, 'preparar la revisión semanal')
 
     def aplicar_semana(self, datos, borrar, guardar, dejar) -> None:
         for r in dejar:
@@ -347,11 +418,11 @@ class App:
     def pausar(self, segundos: float | None) -> None:
         self.pausa_hasta = float('inf') if segundos is None else time.time() + segundos
         log.info('En pausa %s', 'indefinida' if segundos is None else f'{segundos / 3600:.0f} h')
-        self.en_ui(self.bandeja.actualizar)
+        self.bandeja.actualizar()
 
     def reanudar(self) -> None:
         self.pausa_hasta = 0
-        self.en_ui(self.bandeja.actualizar)
+        self.bandeja.actualizar()
 
     def texto_estado(self) -> str:
         hechos, total = self.indice.progreso()
@@ -424,16 +495,17 @@ class App:
         sistema.hilo_en_segundo_plano()
         self._parar.wait(90)                         # que el PC acabe de arrancar (y Drive de conectarse)
         while not self._parar.is_set():
-            pedida = self._sincro_ya.is_set()
-            self._sincro_ya.clear()
-            if self.pausado() or (not pedida and (sistema.pantalla_completa() or sistema.bateria_baja())):
-                self._sincro_ya.wait(300)
-                continue
+            espera = self.cfg.sincro_minutos * 60
             try:
-                self._una_pasada()
+                pedida = self._sincro_ya.is_set()
+                self._sincro_ya.clear()
+                if self.pausado() or (not pedida and (sistema.pantalla_completa() or sistema.bateria_baja())):
+                    espera = 300
+                else:
+                    self._una_pasada()
             except Exception:
                 log.exception('Falló la sincronización')
-            self._sincro_ya.wait(self.cfg.sincro_minutos * 60)
+            self._sincro_ya.wait(espera)
 
     def _copias_word(self) -> None:
         """Antes de cada pasada: los Word de los Docs, del manifiesto de cada cuenta a OneDrive."""
@@ -470,6 +542,10 @@ class App:
             self.sincronizar_ahora()
         self.ejecutar(trabajo, que='borrar el Doc')
 
+    def conservar_doc(self, ruta_pdf: str) -> None:
+        """El PDF no es la versión definitiva: el Doc se queda y no se vuelve a preguntar."""
+        self.ejecutar(lambda: self.words.decidir_pdf(ruta_pdf, 'conservar'), que='guardar tu decisión sobre el PDF')
+
     def _una_pasada(self) -> None:
         try:
             self._copias_word()
@@ -482,7 +558,7 @@ class App:
                 self._avisar_una_vez('inicial', 'Sincronización', 'Aún no puedo empezar a sincronizar: ' + msg.split('\n')[0])
                 return
         self.sincronizando = True
-        self.en_ui(self.bandeja.actualizar)
+        self.bandeja.actualizar()
         try:
             inf = self.sincro.pasada()
         finally:
@@ -516,7 +592,7 @@ class App:
         if self.sincro_retenidos and clave_ret != self._retenidos_vistos:
             self._retenidos_vistos = clave_ret
             self.en_ui(self.abrir_borrados)
-        self.en_ui(self.bandeja.actualizar)
+        self.bandeja.actualizar()
 
     def _avisar_una_vez(self, k: str, titulo: str, texto: str) -> None:
         if k not in self._avisos_vistos:
@@ -530,38 +606,53 @@ class App:
                 and sistema.segundos_inactivo() >= self.cfg.minutos_inactivo * 60)
 
     def _hilo_indice(self) -> None:
+        """Limpieza de Descargas (cada hora), escaneo del índice (cada media hora) y huellas con el PC quieto.
+
+        Cada parte con su propio try: que falle una no para las demás ni el hilo."""
         sistema.hilo_en_segundo_plano()
-        if not os.path.exists(self.cfg.aprendido):
-            n = aprendizaje.crear_inicial(self.cfg.aprendido, self.cfg.onedrive, self.cfg.carpetas_indice,
-                                          self.cfg.ruta_uni, self.cfg.webs_genericas,
-                                          self.cfg.solo_huella + self.cfg.excluir)
-            log.info('aprendido.txt creado con %d reglas', n)
+        try:
+            if not os.path.exists(self.cfg.aprendido):
+                n = aprendizaje.crear_inicial(self.cfg.aprendido, self.cfg.onedrive, self.cfg.carpetas_indice,
+                                              self.cfg.ruta_uni, self.cfg.webs_genericas,
+                                              self.cfg.solo_huella + self.cfg.excluir)
+                log.info('aprendido.txt creado con %d reglas', n)
+        except Exception:
+            log.exception('No pude crear aprendido.txt')
         ultimo_escaneo = ultima_limpieza = 0.0
         while not self._parar.is_set():
-            if time.time() - ultima_limpieza > 3600 and not self.pausado():
-                try:
-                    self._limpiar()
-                except Exception:
-                    log.exception('Falló la limpieza')
-                ultima_limpieza = time.time()
-            if time.time() - ultimo_escaneo > 1800 and not self.pausado():
-                try:
-                    cambios = self.indice.escanear()
-                    log.info('Índice: %d nuevos, %d cambiados, %d borrados', *cambios)
-                    if any(cambios) or not self.perfil.listo:
-                        self.perfil.construir(self.indice.filas_perfil())
-                except Exception:
-                    log.exception('Falló el escaneo del índice')
-                ultimo_escaneo = time.time()
-                self.en_ui(self.bandeja.actualizar)
-            if self._puede_trabajar():
-                n = self.indice.trabajar(self._puede_trabajar)
-                if n:
-                    log.info('Índice: %d archivos procesados', n)
-                    self.perfil.construir(self.indice.filas_perfil())
-                    self.en_ui(self.bandeja.actualizar)
-            self.historial.podar()
+            try:
+                if time.time() - ultima_limpieza > 3600 and not self.pausado():
+                    ultima_limpieza = time.time()
+                    self._intentar('la limpieza', self._limpiar)
+                if time.time() - ultimo_escaneo > 1800 and not self.pausado():
+                    ultimo_escaneo = time.time()
+                    self._intentar('el escaneo del índice', self._escanear_indice)
+                if self._puede_trabajar():
+                    self._intentar('el índice', self._trabajar_indice)
+                self._intentar('la poda del historial', self.historial.podar)
+            except Exception:
+                log.exception('Falló el trabajo de fondo')
             self._parar.wait(30)
+
+    def _intentar(self, que: str, f) -> None:
+        try:
+            f()
+        except Exception:
+            log.exception('Falló %s', que)
+
+    def _escanear_indice(self) -> None:
+        cambios = self.indice.escanear()
+        log.info('Índice: %d nuevos, %d cambiados, %d borrados', *cambios)
+        if any(cambios) or not self.perfil.listo:
+            self.perfil.construir(self.indice.filas_perfil())
+        self.bandeja.actualizar()
+
+    def _trabajar_indice(self) -> None:
+        n = self.indice.trabajar(self._puede_trabajar)
+        if n:
+            log.info('Índice: %d archivos procesados', n)
+            self.perfil.construir(self.indice.filas_perfil())
+            self.bandeja.actualizar()
 
     # ── Arranque y salida ───────────────────────────────────────────────────
     def correr(self) -> None:
@@ -576,6 +667,10 @@ class App:
         threading.Thread(target=self._hilo_vigia, name='vigia', daemon=True).start()
         self.root.after(200, self._bucle_ui)
         self.root.after(1500, self.bandeja.actualizar)
+        if self.reinicios:
+            self.root.after(5000, lambda: self.bandeja.notificar(
+                'Organizador del PC', 'Me he reiniciado solo porque me había quedado bloqueado. Ya funciona; '
+                                      'los detalles están en datos\\cuelgues.log.'))
         self.root.mainloop()
 
     def salir(self) -> None:
@@ -608,7 +703,11 @@ def configurar_registro(cfg) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--config')
+    ap.add_argument('--esperar', type=int, help=argparse.SUPPRESS)          # reinicio solo: el que se cierra
+    ap.add_argument('--reinicios', type=int, default=0, help=argparse.SUPPRESS)
     args = ap.parse_args()
+    if args.esperar:
+        sistema.esperar_proceso(args.esperar, 60)
     cfg = config.cargar(args.config)
     import hashlib
     unica = sistema.InstanciaUnica('Local\\OrganizadorPC-' +
@@ -616,4 +715,4 @@ def main() -> None:
     if unica.ya_abierto:
         return
     configurar_registro(cfg)
-    App(cfg).correr()
+    App(cfg, args.reinicios).correr()

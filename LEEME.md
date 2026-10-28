@@ -7,13 +7,15 @@ Ordena lo que descargas, limpia Descargas y las capturas viejas, mantiene iguale
 ### Organizador de Descargas
 
 - **Vigila Descargas.** Cuando una descarga termina, sale una ventanita abajo a la derecha con todo medio hecho:
-  - la carpeta sugerida, con «Cambiar…»;
+  - la carpeta sugerida, con «Cambiar…», que abre el selector de carpetas de Windows (el del Explorador: doble clic para entrar, barra de direcciones, búsqueda y «Nueva carpeta»);
   - el nombre sugerido, editable;
   - los avisos: duplicados, versión nueva, enunciado/soluciones.
 - **Botones:**
   - **Aceptar** (o Enter) mueve el archivo con ese nombre a esa carpeta.
+  - **Elegir carpeta…** sale en lugar de Aceptar cuando el programa no sabe dónde va: así nada acaba en la raíz de OneDrive sin querer.
   - **Más tarde** (o Esc, o cerrar la ventanita) lo deja en Descargas, en la lista de Pendientes.
   - **Descartar** solo sale si es un duplicado, y lo manda a la Papelera.
+- **Si aceptas guardarlo donde ya está idéntico,** no se crea un «… (2)»: la descarga va a la Papelera y queda anotado en el Historial.
 - **ZIP:** propone descomprimirlo directamente en el destino y mandar el zip a la Papelera.
 - **Nunca mueve nada sin tu clic y nunca borra nada definitivamente.** Lo que quita va a la Papelera de reciclaje.
 - **Si estás a pantalla completa** (un juego, una película), la ventanita espera a que salgas.
@@ -33,10 +35,10 @@ El lunes (o en el siguiente arranque, si el PC estaba apagado) se abre una venta
 
 - **Resumen** de la semana:
   - la sincronización (qué se copió, movió o fue a la papelera en cada sitio);
-  - los **conflictos**, con «Abrir carpeta»;
+  - los **conflictos**, con su ruta entera (doble clic: abrir su carpeta);
   - las copias Word, lo que hizo el organizador y el espacio de OneDrive, G: y H:;
   - lo pendiente;
-  - los **duplicados nuevos** (los de dentro de repos de código no cuentan). Cada archivo tiene «A la papelera» y cada grupo, «No volver a avisar».
+  - los **duplicados nuevos** (los de dentro de repos de código no cuentan). Marca la copia que sobra y pulsa «A la papelera» (siempre deja al menos una); cada grupo tiene también «No volver a avisar».
 - **Capturas:** la revisión de capturas que se explica justo debajo.
 
 Si la semana no tiene nada destacable, no se abre ninguna ventana: solo sale el aviso «Semana sin novedades».
@@ -106,21 +108,29 @@ Contiene `aprendido.txt`, `config.toml` y los datos del programa: el índice, el
 
 | Opción | Qué hace |
 |---|---|
-| Pendientes (clic izquierdo) | Lo que sigue en Descargas y cuántos días le quedan antes de la Papelera, con «Organizar» para volver a abrir la ventanita. |
+| Pendientes (clic izquierdo) | Lo que sigue en Descargas y cuándo irá a la Papelera. «Organizar» (o doble clic) vuelve a abrir la ventanita; «Abrir» abre el archivo. |
 | Revisión semanal | Abre el resumen y la revisión de capturas cuando quieras, sin esperar al lunes. |
 | Sincronizar ahora | Hace una pasada de sincronización ya. En el menú pone cuándo fue la última. |
 | Borrados por confirmar | Solo aparece si la sincronización se ha parado por un borrado masivo. |
-| Historial | Todo lo que ha hecho el programa en los últimos 30 días, cada cosa con su **Deshacer**. Lo que fue a la Papelera vuelve de allí, salvo que la hayas vaciado. |
+| Historial | Todo lo que ha hecho el programa en los últimos 30 días. Marca una fila: **Deshacer** la devuelve como estaba (lo que fue a la Papelera vuelve de allí, salvo que la hayas vaciado) y **Ver archivos** (o doble clic) enseña cada archivo que tocó, con su ruta entera. |
 | Pausar / Reanudar | Durante una hora, o hasta que lo reanudes. En pausa, el icono se pone gris. |
 | Editar lo aprendido | Abre `aprendido.txt`. |
 | Abrir configuración | Abre `config.toml`. |
 | Salir | Cierra el programa hasta el siguiente arranque, o hasta que lo abras desde el menú Inicio («Organizador del PC»). |
+
+**Las listas de archivos** (Pendientes, Historial, borrados por confirmar, conflictos y duplicados) enseñan cada nombre entero y su carpeta. Lo que no cabe se ve con la barra de abajo o con Mayús + rueda del ratón, y la ventana se puede agrandar. Doble clic en un archivo: abrir su carpeta en el Explorador.
+
+## Si deja de responder
+
+El programa se vigila a sí mismo. Si la ventana o el icono dejan de responder 2 minutos (sin contar cuando el PC está en suspensión), o si se para alguna de sus tareas, **se reinicia solo** y te avisa. Lo apunta en `datos\cuelgues.log`. Además, cada 5 minutos repasa Descargas por si Windows no avisó de alguna descarga.
 
 ## Cómo decide la carpeta
 
 Las pistas van de más fiable a menos:
 
 1. **`aprendido.txt`:** de qué curso, recurso de Aula Global o web viene la descarga. Cada vez que aceptas, aprende o corrige esto él solo.
+   - De las webs que sirven para todo (Drive, Gmail, WhatsApp, claude.ai, ChatGPT…, la lista `webs_genericas` de `config.toml`) no aprende nada.
+   - Si de una web guardas cosas en sitios distintos, deja de usarla como pista.
 2. **El contenido:** se compara el título y el texto del PDF con lo que ya tienes en cada carpeta.
 3. **La categoría** (Teoría, Exámenes…) sale de palabras como tema, examen, seminari, pràctica…
 
@@ -153,7 +163,7 @@ Tras cambiar algo: icono → Salir, y vuelve a abrirlo desde el menú Inicio.
 |---|---|
 | Programa | `organizador\` y `organizador.pyw` |
 | Lo que puedes editar | `config.toml` y `aprendido.txt` |
-| Datos del programa | `datos\`: `indice.sqlite` (huellas), `historial.sqlite` (historial y Pendientes) y `registro.log` (lo que pasa, por si algo falla). Si alguna vez el programa deja de responder, `cuelgues.log` dice en qué estaba |
+| Datos del programa | `datos\`: `indice.sqlite` (huellas), `historial.sqlite` (historial y Pendientes) y `registro.log` (lo que pasa, por si algo falla). Si alguna vez el programa deja de responder, `cuelgues.log` dice en qué estaba y cuándo se reinició |
 | Entorno de Python propio | `.venv\` |
 | Pruebas | `tests\` (cómo lanzarlas: en `docs\TRASPASO.md`) |
 | Scripts de Google | `apps_script\exportar_docs.gs` (el que está instalado en tus dos cuentas) |

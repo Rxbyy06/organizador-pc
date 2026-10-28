@@ -1,28 +1,27 @@
-"""Ventana del sincronizador: confirmar (o deshacer) un borrado masivo."""
+"""Ventanas del sincronizador: confirmar (o deshacer) un borrado masivo, y PDF que parecen definitivos."""
 import os
 
 import customtkinter as ctk
 
-from .ventanas import GRIS, ROJO, Ventana, _corto, fuente
+from .ventanas import GRIS, ROJO, TablaRutas, Ventana, fuente, mostrar_en_explorador
+
+ABIERTAS_HASTA = 200           # con más archivos, las carpetas salen cerradas (se abren con un clic)
 
 
-def lineas_borrados(retenidos: list[tuple[str, list[str]]]) -> list[str]:
-    """Los borrados retenidos, agrupados por carpeta: «carpeta\\  ·  N archivos  ·  falta en G:, H:»."""
-    grupos: dict[tuple[str, tuple[str, ...]], list[str]] = {}
+def grupos_borrados(retenidos: list[tuple[str, list[str]]]) -> list[tuple[str, list[tuple[str, list[str]]]]]:
+    """Los borrados retenidos por carpeta: [(carpeta, [(nombre, sitios donde falta)])], todo en orden."""
+    grupos: dict[str, list[tuple[str, list[str]]]] = {}
     for ruta, donde in retenidos:
-        grupos.setdefault((os.path.dirname(ruta), tuple(donde)), []).append(ruta)
-    lineas = []
-    for (carpeta, donde), rutas in sorted(grupos.items(), key=lambda x: x[0][0].casefold()):
-        que = rutas[0] if len(rutas) == 1 else f'{carpeta}{os.sep}  ·  {len(rutas)} archivos'
-        lineas.append(f'{que}  ·  falta en {", ".join(donde)}')
-    return lineas
+        grupos.setdefault(os.path.dirname(ruta), []).append((os.path.basename(ruta), list(donde)))
+    return [(c, sorted(archivos, key=lambda x: x[0].casefold()))
+            for c, archivos in sorted(grupos.items(), key=lambda x: x[0].casefold())]
 
 
 class VentanaBorrados(Ventana):
     """La sincronización se ha parado porque iba a mandar a la papelera muchos archivos."""
 
     def __init__(self, app, retenidos: list[tuple[str, list[str]]]):
-        super().__init__(app.root, 'Sincronización en pausa')
+        super().__init__(app.root, 'Sincronización en pausa', redimensionable=True)
         self.app, self.retenidos = app, retenidos
         n = len(retenidos)
         sitios = sorted({s for _, donde in retenidos for s in donde})
@@ -32,13 +31,23 @@ class VentanaBorrados(Ventana):
         ctk.CTkLabel(cuerpo, text=f'Han desaparecido {n} archivos de {" y ".join(sitios) or "una copia"} que siguen en los '
                                   f'demás sitios. Son más de {app.cfg.max_borrados}, así que no he tocado nada hasta que '
                                   'decidas. Si los borraste tú, mándalos a la papelera también en los demás sitios; si no '
-                                  'sabes qué ha pasado, recupéralos.',
-                     font=fuente(12), text_color=GRIS, anchor='w', justify='left', wraplength=620).pack(fill='x', pady=(2, 8))
-        # Un solo cuadro de texto (no una fila de widgets por archivo): se abre al instante aunque sean miles.
-        lista = ctk.CTkTextbox(cuerpo, width=640, height=300, font=fuente(11), wrap='none')
-        lista.pack(fill='both', expand=True)
-        lista.insert('1.0', '\n'.join(lineas_borrados(retenidos)))
-        lista.configure(state='disabled')
+                                  'sabes qué ha pasado, recupéralos. Doble clic en un archivo: verlo en el Explorador '
+                                  '(donde aún está).',
+                     font=fuente(12), text_color=GRIS, anchor='w', justify='left', wraplength=660).pack(fill='x', pady=(2, 8))
+        # Una lista de ttk (no una fila de widgets por archivo): se abre al instante aunque sean miles.
+        tabla = TablaRutas(cuerpo, [('Carpeta y archivos', 640)], alto=14, arbol=True, al_abrir=self._mostrar)
+        tabla.pack(fill='both', expand=True)
+        grupos = grupos_borrados(retenidos)
+        for carpeta, archivos in grupos:
+            faltan = sorted({s for _, donde in archivos for s in donde})
+            padre = tabla.anadir([f'{carpeta or "(carpeta principal)"}{os.sep}    ({len(archivos)} · falta en '
+                                  f'{", ".join(faltan)})'],
+                                 abierta=n <= ABIERTAS_HASTA or len(grupos) == 1, etiqueta='carpeta')
+            for nombre, donde in archivos:
+                distinto = sorted(donde) != faltan
+                tabla.anadir([nombre + (f'    (falta en {", ".join(donde)})' if distinto else '')],
+                             os.path.join(carpeta, nombre), padre=padre)
+        tabla.ajustar()
         botones = ctk.CTkFrame(cuerpo, fg_color='transparent')
         botones.pack(fill='x', pady=(10, 0))
         ctk.CTkButton(botones, text='Recuperarlos', width=150, font=fuente(13, True),
@@ -54,13 +63,19 @@ class VentanaBorrados(Ventana):
         self.destroy()
         self.app.decidir_borrados(self.retenidos, accion)
 
+    def _mostrar(self, rel):
+        """En el Explorador, en el sitio donde aún está (OneDrive, G: o H:)."""
+        raices = [self.app.cfg.onedrive] + [c['raiz'] for c in self.app.cfg.copias]
+        ruta = next((os.path.join(r, rel) for r in raices if os.path.exists(os.path.join(r, rel))),
+                    os.path.join(self.app.cfg.onedrive, rel))
+        mostrar_en_explorador(ruta)
+
 
 class VentanaPDF(Ventana):
     """Un PDF parece la versión definitiva de un Google Doc: ¿se borra el Doc editable?"""
 
     def __init__(self, app, casos: list[tuple[str, str, str]]):
         super().__init__(app.root, 'Versión definitiva en PDF')
-        import os
         self.app = app
         cuerpo = ctk.CTkFrame(self, fg_color='transparent')
         cuerpo.pack(fill='both', expand=True, padx=18, pady=14)
@@ -72,7 +87,8 @@ class VentanaPDF(Ventana):
         for ruta, id_, nombre in casos:
             f = ctk.CTkFrame(cuerpo)
             f.pack(fill='x', pady=4)
-            ctk.CTkLabel(f, text=f'«{_corto(os.path.basename(ruta), 50)}» parece la versión definitiva de «{nombre}».',
+            ctk.CTkLabel(f, text=f'«{os.path.basename(ruta)}» parece la versión definitiva de «{nombre}».\n'
+                                 f'En {os.path.dirname(app.cfg.relativa(ruta))}',
                          font=fuente(12), anchor='w', justify='left', wraplength=600).pack(fill='x', padx=10, pady=(8, 4))
             b = ctk.CTkFrame(f, fg_color='transparent')
             b.pack(fill='x', padx=10, pady=(0, 8))
@@ -89,7 +105,7 @@ class VentanaPDF(Ventana):
         if id_:
             self.app.borrar_doc(id_, ruta)
         else:
-            self.app.words.decidir_pdf(ruta, 'conservar')
+            self.app.conservar_doc(ruta)
         fila.destroy()
         if not [w for w in self.winfo_children()[0].winfo_children() if isinstance(w, ctk.CTkFrame)]:
             self.destroy()

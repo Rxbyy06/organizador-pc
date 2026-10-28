@@ -6,7 +6,8 @@ import customtkinter as ctk
 
 from .nombres import libre, ruta_valida, sanear
 from .revision import fecha_de, miniatura, nombre_sugerido
-from .ventanas import GRIS, NARANJA, ROJO, VERDE, SelectorCarpeta, Ventana, _corto, _tam, fuente, ruta_bonita
+from .ventanas import (GRIS, NARANJA, ROJO, VERDE, TablaRutas, Ventana, _corto, _tam, carpeta_corta, elegir_carpeta,
+                       fuente, mostrar_en_explorador, ruta_bonita)
 
 
 class PanelCapturas(ctk.CTkFrame):
@@ -35,6 +36,8 @@ class PanelCapturas(ctk.CTkFrame):
         self.l_resumen = ctk.CTkLabel(self, text='', font=fuente(13, True), anchor='w')
         self.l_resumen.pack(fill='x', pady=(8, 0))
         self._resumen()
+        self.abierta = True                             # al cerrar la ventana, las miniaturas que falten no se hacen
+        self.bind('<Destroy>', lambda e: e.widget is self and setattr(self, 'abierta', False), add='+')
         app.ejecutar(self._cargar_miniaturas, que='preparar las miniaturas')
 
     def _celda(self, ruta, fila, col):
@@ -61,6 +64,8 @@ class PanelCapturas(ctk.CTkFrame):
     def _cargar_miniaturas(self):
         """(en segundo plano) Unos 0,4 s por captura; van apareciendo según están."""
         for ruta in self.rutas:
+            if not self.abierta:
+                return
             im = miniatura(ruta, self.LADO)
             self.app.en_ui(lambda r=ruta, im=im: self._poner_miniatura(r, im))
 
@@ -114,7 +119,7 @@ class PanelResumen(ctk.CTkScrollableFrame):
 
         self._seccion('Sincronización')
         sitios = sorted(set(d.copiados) | set(d.movidos))
-        partes = [f'{s}: {d.copiados[s]} copiados, {d.movidos[s]} movidos o renombrados' for s in sitios]
+        partes = [f'{s} {d.copiados[s]} copiados, {d.movidos[s]} movidos o renombrados' for s in sitios]
         self._linea(f'{d.pasadas} pasadas. ' + ('; '.join(partes) if partes else 'Sin cambios que repartir.') +
                     (f' {d.a_papelera} a la papelera.' if d.a_papelera else ''))
         repetidos = [(m, n) for m, n in d.errores.items() if n >= 3]
@@ -122,9 +127,8 @@ class PanelResumen(ctk.CTkScrollableFrame):
             self._linea(f'Se repite ({n} veces): {m}', NARANJA)
         if d.conflictos:
             self._seccion(f'Conflictos ({len(d.conflictos)}): se guardaron las dos versiones')
-            for ruta in d.conflictos:
-                self._fila(ruta, [('Abrir carpeta', lambda r=ruta: os.startfile(
-                    os.path.dirname(os.path.join(app.cfg.onedrive, r))))])
+            self._tabla([os.path.join(app.cfg.onedrive, r) for r in d.conflictos])
+            self._linea('Doble clic en uno: abrir su carpeta en el Explorador.', GRIS)
 
         w = d.words
         if any(w.values()):
@@ -140,7 +144,9 @@ class PanelResumen(ctk.CTkScrollableFrame):
                     f'{a["limpieza"]} limpiezas de Descargas.')
 
         if d.duplicados:
-            self._seccion(f'Duplicados ({len(d.duplicados)} grupos)')
+            n = len(d.duplicados)
+            self._seccion(f'Duplicados ({n} grupo{"s" if n != 1 else ""})')
+            self._linea('Marca la copia que sobra y pulsa «A la papelera» (doble clic: abrir su carpeta).', GRIS)
             for g in d.duplicados:
                 caja = ctk.CTkFrame(self)
                 caja.pack(fill='x', pady=4)
@@ -151,10 +157,14 @@ class PanelResumen(ctk.CTkScrollableFrame):
                 ctk.CTkButton(cab, text='No volver a avisar', width=140, height=24, fg_color='transparent',
                               border_width=1, text_color=('gray10', 'gray90'),
                               command=lambda g=g, c=caja: (app.resumen.ignorar(g), c.destroy())).pack(side='right')
-                for ruta in g.rutas:
-                    self._fila(os.path.relpath(ruta, app.cfg.onedrive),
-                               [('Abrir carpeta', lambda r=ruta: os.startfile(os.path.dirname(r))),
-                                ('A la papelera', lambda r=ruta: app.tirar_duplicado(r))], caja)
+                tabla = self._tabla(g.rutas, caja, varias=True)
+                pie = ctk.CTkFrame(caja, fg_color='transparent')
+                pie.pack(fill='x', padx=8, pady=(4, 8))
+                nota = ctk.CTkLabel(pie, text='', font=fuente(11), text_color=NARANJA, anchor='w')
+                ctk.CTkButton(pie, text='A la papelera', width=130, height=26, font=fuente(11), fg_color=ROJO,
+                              hover_color=('#9E1F1F', '#D45555'),
+                              command=lambda t=tabla, n=nota: self._tirar(t, n)).pack(side='left')
+                nota.pack(side='left', padx=10)
 
         self._seccion('Espacio')
         for u in d.espacio:
@@ -174,12 +184,29 @@ class PanelResumen(ctk.CTkScrollableFrame):
         ctk.CTkLabel(self, text=t, font=fuente(12), anchor='w', justify='left', wraplength=920,
                      text_color=color or ('gray10', 'gray90')).pack(fill='x')
 
-    def _fila(self, texto, botones, padre=None):
-        f = ctk.CTkFrame(padre or self, fg_color='transparent')
-        f.pack(fill='x', padx=8, pady=1)
-        ctk.CTkLabel(f, text=_corto(texto, 105), font=fuente(11), anchor='w').pack(side='left')
-        for t, cmd in reversed(botones):
-            ctk.CTkButton(f, text=t, width=110, height=24, font=fuente(11), command=cmd).pack(side='right', padx=2)
+    def _tabla(self, rutas, padre=None, varias=False) -> TablaRutas:
+        """Los archivos con su ruta entera (nombre y carpeta) y barra horizontal si no caben."""
+        t = TablaRutas(padre or self, [('Archivo', 300), ('Carpeta', 560)], alto=min(len(rutas), 8),
+                       al_abrir=mostrar_en_explorador, varias=varias)
+        for r in rutas:
+            t.anadir([os.path.basename(r), carpeta_corta(self.app.cfg, r)], r)
+        t.ajustar()
+        t.pack(fill='x', padx=8, pady=(2, 0))
+        return t
+
+    def _tirar(self, tabla: TablaRutas, nota):
+        """Las copias marcadas de un grupo de duplicados, a la Papelera. Siempre queda al menos una."""
+        marcadas = tabla.elegidas()
+        if not marcadas:
+            nota.configure(text='Marca primero la copia que sobra.')
+            return
+        if len(marcadas) >= len(tabla.valores):
+            nota.configure(text='Deja al menos una copia: no mando todas a la papelera.')
+            return
+        for iid in marcadas:
+            self.app.tirar_duplicado(tabla.valores[iid])
+            tabla.quitar(iid)
+        nota.configure(text=f'{len(marcadas)} a la papelera (se recupera de allí).')
 
 
 class VentanaSemanal(Ventana):
@@ -262,7 +289,13 @@ class DialogoGuardar(Ventana):
         self.l_carpeta.configure(text=ruta_bonita(self.app.cfg, self.carpeta))
 
     def cambiar(self):
-        SelectorCarpeta(self, self.app, self.carpeta, self._elegida)
+        carpeta = elegir_carpeta(self, self.carpeta, '¿Dónde guardo la captura?')
+        if not self.winfo_exists():
+            return
+        if carpeta:
+            self._elegida(carpeta)
+        self.lift()
+        self.grab_set()
 
     def _elegida(self, carpeta):
         self.carpeta = carpeta

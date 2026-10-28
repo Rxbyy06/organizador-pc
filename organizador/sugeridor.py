@@ -25,7 +25,7 @@ PRACTICA = re.compile(r'\b(practica|practiques|practicas|lab|labs|laboratori|lab
                       r'assignment|projecte|proyecto|project)(?![a-z])|\bp\d{1,2}\b')
 EJERCICIOS = re.compile(r'\b(exercicis?|ejercicios?|exercises?|problemes|problemas|problems|llista|'
                         r'lista|hoja|problem set)(?![a-z])')
-TEORIA_RX = re.compile(r'\b(tema|temes|teoria|apunts|apuntes|transparencies|diapositives|slides|'
+TEORIA_RX = re.compile(r'\b(tema|temes|temas|teoria|apunts|apuntes|transparencies|diapositives|slides|'
                        r'lecture|unitat|unidad|chapter|capitol)(?![a-z])|\bt\d{1,2}\b')
 
 SOL = re.compile(r'\b(sol|sols|solucio|solucions|solucion|soluciones|solution|solutions|solved|resolt|resolts|'
@@ -33,8 +33,10 @@ SOL = re.compile(r'\b(sol|sols|solucio|solucions|solucion|soluciones|solution|so
 ENUNC = re.compile(r'\b(enunciat|enunciats|enunciado|enunciados|statement)\b')
 ENTREGA = re.compile(r'\b(entrega|lliurament|submission|entregable)\b')
 
-TEMA_N = re.compile(r'\b(?:tema|temes|unitat|unidad|unit|chapter|capitol|capitulo|lecture|leccio|leccion|'
-                    r'lesson|t)\s*[-.]?\s*(\d{1,2})(?:\s*(?:-|a|i|y|&|and)\s*(\d{1,2}))?\b')
+TEMA_N = re.compile(r'\b(?:tema|temes|temas|unitat|unidad|unit|chapter|capitol|capitulo|lecture|leccio|leccion|'
+                    r'lesson|t)\s*[-.]?\s*(\d{1,2})(?:\s*(?:-|a|i|y|&|and)\s*(?:t\s*)?(\d{1,2}))?\b')
+# Varios temas juntos con alguna de estas palabras: un resumen («Resumen T1-T6»).
+RESUMEN = re.compile(r'\b(resumen|resumenes|resum|resums|summary|apuntes|apunts|esquema|esquemas|notes)\b')
 SEM_N = re.compile(r'\b(?:seminari|seminario|seminar|sem)\s*[-.]?\s*(\d{1,2})\b')
 PRAC_N = re.compile(r'\b(?:practica|practiques|practicas|lab|laboratori|laboratorio|p)\s*[-.]?\s*(\d{1,2})\b')
 SES_N = re.compile(r'\b(?:sessio|sesion|session)\s*[-.]?\s*(\d{1,2})\b')
@@ -50,7 +52,7 @@ MES_ANO = re.compile(r'\b(' + '|'.join(MESES) + r')\w*\s*(?:de |del |d\')?\s*(20
 ANO = re.compile(r'\b(20[012]\d)\b')
 IDIOMA_FINAL = re.compile(r'[\s-]+(ca|cat|es|esp|en|eng)$', re.I)
 PREFIJO_TITULO = re.compile(
-    r'^\s*(tema|temes|unitat|unidad|unit|chapter|cap[ií]tol|cap[ií]tulo|lecture|seminari|seminario|seminar|'
+    r'^\s*(tema|temes|temas|unitat|unidad|unit|chapter|cap[ií]tol|cap[ií]tulo|lecture|seminari|seminario|seminar|'
     r'pr[àáa]ctica|practice|practical|lab|laboratori|laboratorio|sessi[óo]|sesi[óo]n|session|exercise|'
     r'exercici|ejercicio|t(?=\s?\d))\s*\d{1,2}(\s*[-–a]\s*\d{1,2})?\b\s*[-–:.)]*\s*', re.I)
 # Palabras que solas no son un título.
@@ -60,6 +62,10 @@ GENERICOS = {'physics', 'fisica', 'matematiques', 'matematicas', 'mathematics', 
              'index', 'indice', 'contents', 'continguts', 'resum', 'summary', 'grup', 'grupo', 'group'}
 QUITAR_TITULO = re.compile(r'\b(solucions|soluciones|solutions|enunciat|enunciado|amb solucions|'
                            r'con soluciones)\b', re.I)
+# Cómo se nombra cada serie en un título (para no repetir «Seminari 2» detrás de «Seminario 2 - …»).
+PALABRAS_SEM = r'seminari|seminario|seminar|sem'
+PALABRAS_PRAC = r'pr[àáa]ctica|pr[àáa]cticas|pr[àáa]ctiques|lab|laboratori|laboratorio|p'
+PALABRAS_TEMA = r'tema|temes|temas|t'
 
 
 @dataclass
@@ -160,6 +166,28 @@ def _tipo_examen(t: str) -> str:
     return 'Final'
 
 
+def _sin_frase(texto: str, frase: str) -> str:
+    """Quita «frase» (el nombre de la asignatura) de donde esté, aunque cambie la terminación de las palabras:
+    «Sistemes Operatius», «Sistemas Operativos». Solo nombres de dos palabras o más (una sola es arriesgado)."""
+    def raiz(w):
+        return sin_tildes(w).lower()[:5]
+    objetivo = [raiz(w) for w in re.findall(r'\w+', frase) if len(w) > 2 and not re.fullmatch(r'(?i)i{1,3}|iv', w)]
+    if len(objetivo) < 2:
+        return texto
+    palabras = [m for m in re.finditer(r'\w+', texto) if len(m.group()) > 2]
+    for i in range(len(palabras) - len(objetivo) + 1):
+        if [raiz(m.group()) for m in palabras[i:i + len(objetivo)]] == objetivo:
+            return f'{texto[:palabras[i].start()]} {texto[palabras[i + len(objetivo) - 1].end():]}'.strip()
+    return texto
+
+
+def _sin_numero_repetido(titulo: str, palabras: str, n: int) -> str:
+    """El título sin lo que ya dice el principio del nombre: «Seminario 2 - Informe Seminari 2» → «Informe»."""
+    t = re.sub(rf'(?i)\b(?:{palabras})\s*[-.]?\s*0?{n}\b', ' ', titulo)
+    t = re.sub(r'\s+', ' ', t).strip(' -–:.,;')
+    return t if tokenizar(t) else ''
+
+
 def limpiar_titulo(titulo: str, asignatura: str = '', evitar: set[str] = frozenset()) -> str:
     """Quita del título lo que ya dice el nombre: «Tema 3:», la asignatura, códigos, «Soluciones»…
 
@@ -177,6 +205,7 @@ def limpiar_titulo(titulo: str, asignatura: str = '', evitar: set[str] = frozens
         trozo = PREFIJO_TITULO.sub('', trozo)
         trozo = QUITAR_TITULO.sub('', trozo)
         trozo = re.sub(r'\s*\(\d[\d/ ,]*\)', '', trozo)                  # «(27057/27188)»
+        trozo = _sin_frase(trozo, asignatura)                            # «Informe … Sistemes Operatius»
         trozo = re.sub(r'\b(continguts|contenidos|contents|[ií]ndex|[ií]ndice|outline)\s*$', '', trozo, flags=re.I)
         if trozo.count('(') != trozo.count(')'):
             trozo = trozo.replace('(', '').replace(')', '')
@@ -232,9 +261,13 @@ def componer_nombre(categoria: str | None, s: dict, hermanos: list[str], asignat
                               trimestre, tipo == 'Recuperación', s.get('creado'))
         return unir(ano, tipo, 'Soluciones' if sol else '')
     if categoria == C.SEMINARIOS and (m := SEM_N.search(t)):
-        return unir(f"Seminario {_ancho('Seminario', int(m.group(1)), hermanos)}", titulo, tipo_doc)
+        n = int(m.group(1))
+        return unir(f"Seminario {_ancho('Seminario', n, hermanos)}", _sin_numero_repetido(titulo, PALABRAS_SEM, n),
+                    tipo_doc)
     if categoria == C.PRACTICAS and (m := PRAC_N.search(t)):
-        return unir(f"Práctica {_ancho('Práctica', int(m.group(1)), hermanos)}", titulo, tipo_doc)
+        n = int(m.group(1))
+        return unir(f"Práctica {_ancho('Práctica', n, hermanos)}", _sin_numero_repetido(titulo, PALABRAS_PRAC, n),
+                    tipo_doc)
     if re.search(r'\b(sessio|sesion|session)\b', t) and (m := FECHA.search(t)):
         a, mes, d = (m.group(1), m.group(2), m.group(3)) if m.group(1) else (m.group(6), m.group(5), m.group(4))
         return unir(f'Sesión {a}-{int(mes):02d}-{int(d):02d}', titulo)
@@ -246,10 +279,12 @@ def componer_nombre(categoria: str | None, s: dict, hermanos: list[str], asignat
     if categoria in (C.TEORIA, None) and (m := TEMA_N.search(t)):
         a = int(m.group(1))
         b = int(m.group(2)) if m.group(2) and int(m.group(2)) > a else None
+        if b and RESUMEN.search(t):                     # apuntes de varios temas juntos
+            return f'Resumen T{a}-T{b}'
         num = _ancho('Tema', max(a, b or 0), hermanos)
         ancho = len(num) if max(a, b or 0) < 10 else 2
         tema = f'Tema {a:0{ancho}d}' + (f'-{b:0{ancho}d}' if b else '')
-        return unir(tema, titulo)
+        return unir(tema, titulo if b else _sin_numero_repetido(titulo, PALABRAS_TEMA, a))
     nombre = titulo or capitalizar(s['limpio'])
     if sol and categoria == C.EJERCICIOS and 'soluciones' not in _n(nombre):
         nombre = unir(nombre, 'Soluciones')
@@ -291,7 +326,9 @@ class Sugeridor:
                   'contexto': 'este recurso de Aula Global ya lo conocía',
                   'actividad': 'esta actividad de Aula Global ya la conocía',
                   'web': 'lo que bajas de {} va aquí (aprendido)'}
-        for (tipo, valor), destino in self.aprendido.buscar(o.claves()):
+        # Una web genérica (Drive, el correo, claude.ai…) sirve para todo: no dice dónde va (aunque se aprendiera antes).
+        claves = [k for k in o.claves() if not (k[0] == 'web' and k[1] in self.cfg.webs_genericas)]
+        for (tipo, valor), destino in self.aprendido.buscar(claves):
             ruta = os.path.join(self.cfg.onedrive, destino)
             if os.path.isdir(ruta) or os.path.isdir(os.path.dirname(ruta)):
                 return ruta, textos[tipo].format(valor), True
@@ -319,14 +356,18 @@ class Sugeridor:
 
     def nombre_para(self, s: Sugerencia, carpeta: str) -> str:
         """Nombre sugerido para esa carpeta (cambia con la categoría y con los hermanos)."""
+        asig = C.asignatura_de(carpeta, self.cfg.ruta_uni)
+        senales = s.senales
         if s.es_zip:
             z = s.zip
             if z.archivo_unico:
                 base = partir_ext(os.path.basename(z.miembros[0][1]))[0]
             else:
                 base = z.raiz_unica or s.senales['limpio']
-            return recortar(carpeta, sanear(base), '')
-        asig = C.asignatura_de(carpeta, self.cfg.ruta_uni)
+            if not asig:
+                return recortar(carpeta, sanear(base), '')
+            # En la uni, lo que sale del zip sigue las mismas normas: «P2.zip» → «Práctica 2».
+            senales = dict(s.senales, limpio=limpiar_original(base))
         categoria = None
         if asig:
             nombres_cat = {C._sin_numero(x): x for x in C.CATEGORIAS}
@@ -337,11 +378,21 @@ class Sugeridor:
         except OSError:
             hermanos = []
         if asig:
-            senales = dict(s.senales, evitar=self.perfil.tipicas(os.path.relpath(asig.ruta, self.cfg.onedrive)))
+            senales = dict(senales, evitar=self.perfil.tipicas(os.path.relpath(asig.ruta, self.cfg.onedrive)))
             nombre = componer_nombre(categoria, senales, hermanos, asig.nombre, asig.trimestre)
         else:
-            nombre = elegir_titulo(s.senales)
+            nombre = elegir_titulo(senales)
+        if s.es_zip:
+            return recortar(carpeta, sanear(nombre or base), '')
         return recortar(carpeta, sanear(nombre), s.ext)
+
+    @staticmethod
+    def es_igual(ruta: str, s: Sugerencia) -> bool:
+        """¿Ese archivo es idéntico a la descarga? (mismo tamaño y misma huella)"""
+        try:
+            return os.path.getsize(ruta) == s.tam and huella(ruta) == s.hash
+        except OSError:
+            return False
 
     def ext_final(self, s: Sugerencia, descomprimir: bool) -> str:
         if s.es_zip and descomprimir:

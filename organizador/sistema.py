@@ -93,6 +93,16 @@ def rectangulo(hwnd: int) -> tuple[int, int, int, int] | None:
     return r.left, r.top, r.right, r.bottom
 
 
+def esperar_proceso(pid: int, segundos: float) -> None:
+    """Espera (como mucho «segundos») a que termine otro proceso."""
+    SYNCHRONIZE = 0x00100000
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    h = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+    if h:
+        kernel32.WaitForSingleObject(wintypes.HANDLE(h), int(segundos * 1000))
+        kernel32.CloseHandle(wintypes.HANDLE(h))
+
+
 class InstanciaUnica:
     """Mutex con nombre: impide abrir el programa dos veces."""
 

@@ -1,7 +1,16 @@
-"""Icono junto al reloj (bandeja del sistema) con el menú de todo el programa."""
+"""Icono junto al reloj (bandeja del sistema) con el menú de todo el programa.
+
+El menú solo lee textos ya calculados: los cuenta un hilo propio («bandeja-estado») cuando se le pide
+(actualizar, desde cualquier hilo) y cada minuto. Así ni el hilo del icono ni el de las ventanas esperan
+nunca a un disco lento o a un candado de otro hilo.
+"""
+import logging
+import threading
+
 import pystray
 from PIL import Image, ImageDraw
 
+log = logging.getLogger(__name__)
 AZUL, GRIS, NARANJA = (46, 125, 215, 255), (140, 140, 140, 255), (240, 140, 30, 255)
 
 
@@ -20,26 +29,37 @@ def imagen(pausado: bool = False, pendientes: int = 0) -> Image.Image:
     return im
 
 
+def _corta(texto: str, n: int) -> str:
+    """Windows no admite textos más largos en el icono (y entonces no enseña nada)."""
+    return texto if len(texto) <= n else texto[:n - 1] + '…'
+
+
 class Bandeja:
     def __init__(self, app):
         self.app = app
         a = app
+        self.estado = {'pendientes': 'Pendientes', 'revision': 'Revisión semanal', 'borrados': '',
+                       'texto': 'Arrancando…', 'pausado': False}
+        self._pedido = threading.Event()
+        self._dibujo = None                          # (pausado, hay pendientes) del icono que se ve
+
+        def e(clave):
+            return lambda i: self.estado[clave]
         M = pystray.MenuItem
         menu = pystray.Menu(
-            M(lambda i: f'Pendientes ({a.n_pendientes()})', lambda: a.en_ui(a.abrir_pendientes), default=True),
+            M(e('pendientes'), lambda: a.en_ui(a.abrir_pendientes), default=True),
             M('Historial…', lambda: a.en_ui(a.abrir_historial)),
             pystray.Menu.SEPARATOR,
-            M(lambda i: f'Revisión semanal ({a.n_revision()})', lambda: a.en_ui(a.abrir_revision)),
+            M(e('revision'), lambda: a.en_ui(a.abrir_revision)),
             M('Sincronizar ahora', lambda: a.sincronizar_ahora()),
-            M(lambda i: f'Borrados por confirmar ({len(a.sincro_retenidos)})', lambda: a.en_ui(a.abrir_borrados),
-              visible=lambda i: bool(a.sincro_retenidos)),
+            M(e('borrados'), lambda: a.en_ui(a.abrir_borrados), visible=lambda i: bool(self.estado['borrados'])),
             pystray.Menu.SEPARATOR,
-            M(lambda i: a.texto_estado(), None, enabled=False),
+            M(e('texto'), None, enabled=False),
             M('Pausar', pystray.Menu(
                 M('1 hora', lambda: a.pausar(3600)),
                 M('Hasta que lo reanude', lambda: a.pausar(None)),
-            ), visible=lambda i: not a.pausado()),
-            M('Reanudar', lambda: a.reanudar(), visible=lambda i: a.pausado()),
+            ), visible=lambda i: not self.estado['pausado']),
+            M('Reanudar', lambda: a.reanudar(), visible=lambda i: self.estado['pausado']),
             pystray.Menu.SEPARATOR,
             M('Editar lo aprendido', lambda: a.abrir_archivo(a.cfg.aprendido)),
             M('Abrir configuración', lambda: a.abrir_archivo(a.cfg.archivo)),
@@ -48,23 +68,50 @@ class Bandeja:
         self.icono = pystray.Icon('OrganizadorPC', imagen(), 'Organizador del PC', menu)
 
     def arrancar(self):
-        import threading
         threading.Thread(target=self.icono.run, name='bandeja', daemon=True).start()
+        threading.Thread(target=self._hilo_estado, name='bandeja-estado', daemon=True).start()
 
     def actualizar(self):
-        n, avisos = self.app.n_pendientes(), self.app.n_avisos()
-        self.icono.icon = imagen(self.app.pausado(), n)
-        self.icono.title = 'Organizador del PC' + (' · en pausa' if self.app.pausado() else '') + \
+        """(desde cualquier hilo) Que se vuelvan a contar pendientes, avisos y estado. No espera a nada."""
+        self._pedido.set()
+
+    def _hilo_estado(self):
+        while True:
+            self._pedido.wait(60)                    # y cada minuto, por el «sincronizado hace N min»
+            self._pedido.clear()
+            try:
+                self.refrescar()
+            except Exception:
+                log.exception('No pude actualizar el icono')
+
+    def refrescar(self):
+        a = self.app
+        filas = a.pendientes()
+        n = len(filas)
+        avisos = sum(1 for _, _, quedan in filas if quedan <= a.cfg.dias_aviso * 86400)
+        pausado = a.pausado()
+        retenidos = len(a.sincro_retenidos)
+        estado = {'pendientes': f'Pendientes ({n})', 'revision': f'Revisión semanal ({a.n_revision()})',
+                  'borrados': f'Borrados por confirmar ({retenidos})' if retenidos else '',
+                  'texto': a.texto_estado(), 'pausado': pausado}
+        titulo = 'Organizador del PC' + (' · en pausa' if pausado else '') + \
             (f' · {n} pendiente{"s" if n != 1 else ""}' if n else '') + \
             (f' · {avisos} a la Papelera mañana' if avisos else '')
-        self.icono.update_menu()
+        if (pausado, bool(n)) != self._dibujo:
+            self._dibujo = (pausado, bool(n))
+            self.icono.icon = imagen(pausado, n)
+        if _corta(titulo, 127) != self.icono.title:
+            self.icono.title = _corta(titulo, 127)
+        if estado != self.estado:
+            self.estado = estado
+            self.icono.update_menu()
 
     def notificar(self, titulo: str, texto: str):
         """Aviso de Windows (solo informa: no mueve nada)."""
         try:
-            self.icono.notify(texto, titulo)
+            self.icono.notify(_corta(texto, 255), _corta(titulo, 63))
         except Exception:
-            pass
+            log.exception('No pude enseñar el aviso «%s»', titulo)
 
     def parar(self):
         self.icono.stop()

@@ -17,11 +17,13 @@ from .perfil import tokenizar
 log = logging.getLogger(__name__)
 
 IGNORAR_EXT = {'.tmp', '.crdownload', '.part', '.gdoc', '.gsheet', '.gslides', '.gform', '.gmap',
-               '.gdraw', '.gsite', '.gjam', '.glink'}
+               '.gdraw', '.gsite', '.gjam', '.glink',
+               '.orgsync-tmp', '.orgdocs-tmp'}          # copias a medias del propio programa
 IGNORAR_NOMBRES = {'desktop.ini', 'thumbs.db', '.ds_store'}
 # Archivos solo en la nube (OneDrive los descargaría al leerlos).
 SOLO_EN_NUBE = 0x400000 | 0x40000 | 0x1000
 CON_TEXTO = {'.pdf', '.docx', '.pptx'}
+LOTE = 500                     # filas por escritura: entre lote y lote, los demás hilos pueden consultar
 
 
 def ignorado(nombre: str) -> bool:
@@ -41,7 +43,8 @@ class Indice:
     def __init__(self, cfg):
         self.cfg = cfg
         self._lock = threading.RLock()
-        self.db = sqlite3.connect(os.path.join(cfg.datos, 'indice.sqlite'), check_same_thread=False)
+        self._ruta = os.path.join(cfg.datos, 'indice.sqlite')
+        self.db = sqlite3.connect(self._ruta, check_same_thread=False)
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.executescript('''
             CREATE TABLE IF NOT EXISTS archivos (
@@ -57,6 +60,18 @@ class Indice:
         self._privado = [nc(p) for p in cfg.solo_huella]
         self._texto = [nc(p) for p in cfg.leer_texto_en]
         self._excluir = {nc(os.path.join(cfg.onedrive, p)) for p in cfg.excluir}
+        self._contar()
+
+    def _leer_todo(self, sql: str, args=()) -> list[tuple]:
+        """Consulta larga con su propia conexión (WAL): no coge el candado ni hace esperar a nadie."""
+        db = sqlite3.connect(self._ruta)
+        try:
+            return db.execute(sql, args).fetchall()
+        finally:
+            db.close()
+
+    def _contar(self) -> None:
+        self._progreso = tuple(self._leer_todo('SELECT COALESCE(SUM(hecho),0), COUNT(*) FROM archivos')[0])
 
     # ── Recorrido ───────────────────────────────────────────────────────────
     def _es(self, rel: str, prefijos: list[str]) -> bool:
@@ -90,8 +105,7 @@ class Indice:
 
     def escanear(self) -> tuple[int, int, int]:
         """Compara tamaño y fecha con lo guardado. Barato: no lee ningún archivo."""
-        with self._lock:
-            antes = {r: (t, m) for r, t, m in self.db.execute('SELECT ruta, tam, mtime FROM archivos')}
+        antes = {r: (t, m) for r, t, m in self._leer_todo('SELECT ruta, tam, mtime FROM archivos')}
         vistos, nuevos, cambiados = set(), [], []
         for rel, tam, mtime, en_nube in self._recorrer():
             vistos.add(rel)
@@ -103,10 +117,15 @@ class Indice:
             elif previo != (tam, mtime):
                 cambiados.append((rel, tam, mtime))
         borrados = [r for r in antes if r not in vistos]
-        with self._lock, self.db:
-            for rel, tam, mtime in nuevos + cambiados:
-                self._guardar_basico(rel, tam, mtime)
-            self.db.executemany('DELETE FROM archivos WHERE ruta=?', [(r,) for r in borrados])
+        cambios = nuevos + cambiados
+        for i in range(0, len(cambios), LOTE):
+            with self._lock, self.db:
+                for rel, tam, mtime in cambios[i:i + LOTE]:
+                    self._guardar_basico(rel, tam, mtime)
+        for i in range(0, len(borrados), LOTE):
+            with self._lock, self.db:
+                self.db.executemany('DELETE FROM archivos WHERE ruta=?', [(r,) for r in borrados[i:i + LOTE]])
+        self._contar()
         return len(nuevos), len(cambiados), len(borrados)
 
     def _guardar_basico(self, rel, tam, mtime, hash_=None):
@@ -144,28 +163,33 @@ class Indice:
     def trabajar(self, puede_seguir, pausa: float = 0.002) -> int:
         """Procesa pendientes mientras puede_seguir() sea cierto. Devuelve cuántos ha hecho."""
         hechos = 0
-        while puede_seguir():
-            with self._lock:
-                filas = [r for (r,) in self.db.execute('SELECT ruta FROM archivos WHERE hecho=0 LIMIT 50')]
-            if not filas:
-                break
-            for rel in filas:
-                if not puede_seguir():
-                    return hechos
-                try:
-                    self.procesar(rel)
-                except Exception:
-                    log.exception('No pude indexar %s', rel)
-                    with self._lock, self.db:
-                        self.db.execute('UPDATE archivos SET hecho=1 WHERE ruta=?', (rel,))
-                hechos += 1
-                time.sleep(pausa)
-        return hechos
+        try:
+            while puede_seguir():
+                with self._lock:
+                    filas = [r for (r,) in self.db.execute('SELECT ruta FROM archivos WHERE hecho=0 LIMIT 50')]
+                if not filas:
+                    break
+                for rel in filas:
+                    if not puede_seguir():
+                        return hechos
+                    try:
+                        self.procesar(rel)
+                    except Exception:
+                        log.exception('No pude indexar %s', rel)
+                        with self._lock, self.db:
+                            self.db.execute('UPDATE archivos SET hecho=1 WHERE ruta=?', (rel,))
+                    hechos += 1
+                    time.sleep(pausa)
+                self._contar()
+            return hechos
+        finally:
+            if hechos:
+                self._contar()
 
     # ── Consultas ───────────────────────────────────────────────────────────
     def progreso(self) -> tuple[int, int]:
-        with self._lock:
-            return self.db.execute('SELECT COALESCE(SUM(hecho),0), COUNT(*) FROM archivos').fetchone()
+        """(con huella, total). Lo último que se contó: no espera a nadie (lo lee el icono)."""
+        return self._progreso
 
     def iguales(self, hash_: str, tam: int) -> list[str]:
         """Archivos idénticos (por huella). Si alguno del mismo tamaño aún no tiene huella, la calcula ya."""
@@ -198,8 +222,7 @@ class Indice:
         return f[0] if f else None
 
     def filas_perfil(self):
-        with self._lock:
-            return self.db.execute('SELECT ruta, palabras, mtime FROM archivos WHERE privado=0').fetchall()
+        return self._leer_todo('SELECT ruta, palabras, mtime FROM archivos WHERE privado=0')
 
     # ── Cambios hechos por el programa ──────────────────────────────────────
     def anadir(self, ruta: str, hash_: str | None = None) -> None:

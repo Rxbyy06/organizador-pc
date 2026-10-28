@@ -255,23 +255,34 @@ class Ejecutor:
         pasos = [{'op': 'crear_carpeta', 'ruta': r} for r in _carpetas_que_faltan(carpeta)]
         pasos += [{'op': 'papelera', 'ruta': r} for r in quitar]
         rel = self.cfg.relativa(carpeta)
+        # Lo que se sugirió (para poder afinar las sugerencias comparándolo con lo elegido).
+        sugerido = self.cfg.relativa(os.path.join(s.carpeta, s.nombre))
         if s.es_zip and descomprimir:
-            pasos.append({'op': 'extraer', 'zip': s.archivo, 'carpeta': carpeta, 'nombre': nombre})
+            pasos.append({'op': 'extraer', 'zip': s.archivo, 'carpeta': carpeta, 'nombre': nombre, 'sugerido': sugerido})
             pasos.append({'op': 'papelera', 'ruta': s.archivo})
             que = f'«{nombre}{ext}»' if s.zip.archivo_unico else f'{s.zip.total} archivos en «{nombre}»'
             descripcion = f'Descomprimido «{os.path.basename(s.archivo)}» → {que} ({rel}); el zip, a la Papelera'
         else:
-            pasos.append({'op': 'mover', 'de': s.archivo, 'a': os.path.join(carpeta, nombre + ext), 'hash': s.hash})
+            pasos.append({'op': 'mover', 'de': s.archivo, 'a': os.path.join(carpeta, nombre + ext), 'hash': s.hash,
+                          'sugerido': sugerido + s.ext})
             descripcion = f'Movido «{os.path.basename(s.archivo)}» → {rel}\\{nombre}{ext}'
         if quitar:
             descripcion += f' (y {len(quitar)} antiguo{"s" if len(quitar) > 1 else ""} a la Papelera)'
+        if os.path.normcase(sugerido) != os.path.normcase(self.cfg.relativa(os.path.join(carpeta, nombre))):
+            log.info('Sugerencia cambiada: «%s» → «%s»', sugerido, self.cfg.relativa(os.path.join(carpeta, nombre)))
         res = self._ejecutar('mover', descripcion, pasos)
         self._aprender(s, carpeta)
         return res
 
-    def descartar(self, s) -> str:
-        return self._ejecutar('descartar', f'Descartado «{os.path.basename(s.archivo)}» (a la Papelera)',
-                              [{'op': 'papelera', 'ruta': s.archivo}])
+    def descartar(self, s, ya_estaba: str | None = None) -> str:
+        """A la Papelera. «ya_estaba»: iba a guardarlo donde ya hay uno idéntico (esa carpeta se aprende igual)."""
+        pasos = [{'op': 'papelera', 'ruta': s.archivo}]
+        if not ya_estaba:
+            return self._ejecutar('descartar', f'Descartado «{os.path.basename(s.archivo)}» (a la Papelera)', pasos)
+        res = self._ejecutar('descartar', f'«{os.path.basename(s.archivo)}» ya estaba idéntico en '
+                                          f'{self.cfg.relativa(ya_estaba)}: la descarga, a la Papelera', pasos)
+        self._aprender(s, os.path.dirname(ya_estaba))
+        return res
 
     def limpiar_descargas(self, rutas: list[str]) -> str:
         nombres = ', '.join(f'«{os.path.basename(r)}»' for r in rutas[:4]) + (' y más' if len(rutas) > 4 else '')
@@ -308,14 +319,19 @@ class Ejecutor:
         asig = C.asignatura_de(carpeta, self.cfg.ruta_uni)
         dest = self.cfg.relativa(carpeta)
         dest_asig = self.cfg.relativa(asig.ruta) if asig else dest
-        reglas = {}
+        reglas, olvidar = {}, []
         for tipo, valor in s.origen.claves():
             if tipo == 'web' and valor in self.cfg.webs_genericas:
                 continue
             general = tipo == 'curso' or (tipo == 'contexto' and s.origen.componente == 'course')
-            reglas[(tipo, valor)] = dest_asig if general else dest
+            destino = dest_asig if general else dest
+            previa = self.aprendido.regla(tipo, valor) if tipo == 'web' else None
+            if previa is not None and clave(previa) != clave(destino):
+                olvidar.append((tipo, valor))        # de esa web bajas cosas para sitios distintos: no dice dónde van
+                continue
+            reglas[(tipo, valor)] = destino
         try:
-            self.aprendido.aprender(reglas)
+            self.aprendido.aprender(reglas, olvidar)
         except OSError:
             log.exception('No pude guardar lo aprendido')
 

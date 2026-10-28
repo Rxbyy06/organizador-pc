@@ -857,18 +857,19 @@ class Sincronizador:
         """Copia segura: a un nombre temporal y, al acabar, se renombra (nunca queda un archivo a medias)."""
         os.makedirs(ruta_larga(os.path.dirname(destino)), exist_ok=True)
         tmp = destino + TMP
-        shutil.copyfile(ruta_larga(origen), ruta_larga(tmp))
         try:
-            shutil.copystat(ruta_larga(origen), ruta_larga(tmp))     # fecha y «solo lectura»
-        except OSError:
-            st = os.stat(ruta_larga(origen))
-            os.utime(ruta_larga(tmp), (st.st_atime, st.st_mtime))
-        if os.path.exists(ruta_larga(destino)) and not os.access(ruta_larga(destino), os.W_OK):
-            os.chmod(ruta_larga(destino), stat.S_IWRITE | stat.S_IREAD)   # un Word de solo lectura que se actualiza
-        try:
-            os.replace(ruta_larga(tmp), ruta_larga(destino))
-        except OSError:
+            shutil.copyfile(ruta_larga(origen), ruta_larga(tmp))
             try:
+                shutil.copystat(ruta_larga(origen), ruta_larga(tmp))     # fecha y «solo lectura»
+            except OSError:
+                st = os.stat(ruta_larga(origen))
+                os.utime(ruta_larga(tmp), (st.st_atime, st.st_mtime))
+            if os.path.exists(ruta_larga(destino)) and not os.access(ruta_larga(destino), os.W_OK):
+                os.chmod(ruta_larga(destino), stat.S_IWRITE | stat.S_IREAD)   # un Word de solo lectura que se actualiza
+            os.replace(ruta_larga(tmp), ruta_larga(destino))
+        except BaseException:
+            try:                                         # el temporal a medias es nuestro: fuera
+                os.chmod(ruta_larga(tmp), stat.S_IWRITE | stat.S_IREAD)
                 os.remove(ruta_larga(tmp))
             except OSError:
                 pass
