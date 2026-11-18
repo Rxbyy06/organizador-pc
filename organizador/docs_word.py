@@ -68,6 +68,20 @@ def _solo_lectura(ruta: str) -> None:
         pass
 
 
+def _quitar_vacias(carpeta: str, raiz: str) -> None:
+    """Quita «carpeta» y las de encima mientras se queden vacías. Nunca la raíz ni sus carpetas principales
+    de OneDrive: solo las que están dentro de ellas. El sincronizador lo propaga a las copias."""
+    raiz = os.path.normcase(os.path.normpath(raiz))
+    carpeta = os.path.normpath(carpeta)
+    while os.path.normcase(os.path.dirname(carpeta)) != raiz and \
+            os.path.normcase(carpeta).startswith(raiz + os.sep):
+        try:
+            os.rmdir(ruta_larga(carpeta))          # solo funciona si está vacía
+        except OSError:
+            return
+        carpeta = os.path.dirname(carpeta)
+
+
 def _palabras(texto: str) -> set[str]:
     return set(re.findall(r'\w{4,}', nfc(texto).lower()))
 
@@ -150,6 +164,7 @@ class Words:
                 destino = os.path.join(self.cfg.onedrive, rel)
                 os.makedirs(ruta_larga(os.path.dirname(destino)), exist_ok=True)
                 os.rename(ruta_larga(actual), ruta_larga(destino))
+                _quitar_vacias(os.path.dirname(actual), self.cfg.onedrive)
                 if self.indice is not None:
                     self.indice.quitar(actual)
                     self.indice.anadir(destino, h_viejo)
@@ -184,6 +199,7 @@ class Words:
                     if self.indice is not None:
                         self.indice.quitar(ruta)
                     inf.a_papelera.append(rel)
+                    _quitar_vacias(os.path.dirname(ruta), self.cfg.onedrive)
             self.db.execute('DELETE FROM words WHERE id=?', (id_,))
 
     def _destino(self, d: dict, ocupadas: set[str]) -> str:

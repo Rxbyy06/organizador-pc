@@ -124,6 +124,29 @@ class Docs(unittest.TestCase):
         self.assertEqual(d.a_papelera, [nuevo])
         self.assertFalse(os.path.exists(os.path.join(self.O, nuevo)) or os.path.exists(os.path.join(self.H, nuevo)))
 
+    def test_carpetas_vacias_se_quitan_al_borrar_o_mover_el_doc(self):
+        j = os.path.join
+        self.exportar('doc1', 'Informe', f'{UNI}/Mates/Seminario 4/Entrega', b'v1')
+        self.pasada()
+        self.docs['doc1'].update(ruta=f'{UNI}/Mates/Seminario 5')                       # se mueve
+        self._manifiesto()
+        self.pasada()
+        for r in (self.O, self.H):
+            self.assertFalse(os.path.exists(j(r, UNI, 'Mates', 'Seminario 4')), r)   # la vieja, fuera
+            self.assertTrue(os.path.exists(j(r, UNI, 'Mates', 'Seminario 5', 'Informe.docx')), r)
+        self.quitar('doc1')                                                            # se borra
+        self.pasada()
+        for r in (self.O, self.H):
+            self.assertFalse(os.path.exists(j(r, UNI, 'Mates', 'Seminario 5')), r)
+            self.assertTrue(os.path.exists(j(r, UNI, 'Mates', 'Tema 1.pdf')), r)      # lo que no está vacío se queda
+        # una carpeta principal no se quita nunca, aunque se quede vacía
+        self.exportar('doc2', 'Suelto', UNI, b'v1')
+        os.remove(j(self.O, UNI, 'Mates', 'Tema 1.pdf'))
+        self.pasada()
+        self.quitar('doc2')
+        self.pasada()
+        self.assertTrue(os.path.isdir(j(self.O, UNI)))
+
     def test_word_editado_a_mano_no_se_pisa(self):
         self.exportar('doc1', 'Resumen', f'{UNI}/Mates', b'v1')
         self.pasada()

@@ -76,7 +76,7 @@ Sitios (mi configuración): OneDrive (5 GB) en el centro, G: (Drive de la univer
 - Repos git: solo de OneDrive a las copias y tras 10 min sin cambios ni `index.lock`.
 - Nada que no quepa en la Papelera se borra: Windows lo eliminaría sin avisar, y en H: el límite es de 1,5 GB.
 
-**Copias Word** (`docs_word.py`): antes de cada pasada lee los `manifest.json`. Doc nuevo, cambiado, renombrado o borrado → el Word se copia, actualiza, mueve o va a la papelera. Un Word editado a mano se aparta como `(editado en Word fecha)`, y si choca con un Word propio se llama `… (Doc).docx`. `Sincronizador.excluir()` impide que el Word vuelva a la cuenta de su Doc. El PDF definitivo (mismo nombre o texto que un Doc) siempre se pregunta; «Borrar el Doc» manda su `.gdoc` a la papelera de G:, y Drive lo pasa a su papelera.
+**Copias Word** (`docs_word.py`): antes de cada pasada lee los `manifest.json`. Doc nuevo, cambiado, renombrado o borrado → el Word se copia, actualiza, mueve o va a la papelera, y las carpetas que se quedan vacías se quitan (nunca una carpeta principal; el sincronizador lo propaga a las copias). Un Word que falta en OneDrive se vuelve a copiar mientras su Doc exista: para quitarlo hay que borrar el Doc. Un Word editado a mano se aparta como `(editado en Word fecha)`, y si choca con un Word propio se llama `… (Doc).docx`. `Sincronizador.excluir()` impide que el Word vuelva a la cuenta de su Doc. El PDF definitivo (mismo nombre o texto que un Doc) siempre se pregunta; «Borrar el Doc» manda su `.gdoc` a la papelera de G:, y Drive lo pasa a su papelera.
 
 ## 5. Decisiones de diseño
 
@@ -103,7 +103,7 @@ Sitios (mi configuración): OneDrive (5 GB) en el centro, G: (Drive de la univer
 
 | Orden | Qué prueba |
 |---|---|
-| `.venv\Scripts\python.exe -m unittest discover tests` | 102 pruebas: reglas del organizador (con casos reales de sugerencias corregidas), limpieza y revisión (reloj simulado), sincronizador (carpetas locales como OneDrive/G:/H:), copias Word, resumen/espacio/copia, hilos y cuelgues (`test_hilos`: el cuelgue de octubre reproducido, icono y ventanas sin esperas), vigía y reinicio (`test_interfaz_sincro`) y las listas de rutas con ventanas de verdad (`test_ventanas`). Lo que mandan a la Papelera lo recuperan al acabar |
+| `.venv\Scripts\python.exe -m unittest discover tests` | 103 pruebas: reglas del organizador (con casos reales de sugerencias corregidas), limpieza y revisión (reloj simulado), sincronizador (carpetas locales como OneDrive/G:/H:), copias Word, resumen/espacio/copia, hilos y cuelgues (`test_hilos`: el cuelgue de octubre reproducido, icono y ventanas sin esperas), vigía y reinicio (`test_interfaz_sincro`) y las listas de rutas con ventanas de verdad (`test_ventanas`). Lo que mandan a la Papelera lo recuperan al acabar |
 | `python tests/crear_sandbox.py pruebas` | Crea `pruebas\`, una copia de la estructura real con archivos de relleno (sin las notas privadas) y una config que **nunca** apunta fuera de `pruebas\` (ni a G:/H: ni a la carpeta de copias reales) |
 | `python tests/prueba_organizador.py pruebas <capturas>` | De punta a punta con ventanas de verdad: descargas, sugerencias, Aceptar/Descartar/Más tarde, ZIP, deshacer (49 comprobaciones) |
 | `python tests/prueba_limpieza_revision.py pruebas <capturas>` | Aviso del día 6, Papelera del día 7, ventana semanal, «Guardar en…», deshacer (18) |

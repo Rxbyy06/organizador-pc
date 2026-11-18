@@ -96,6 +96,8 @@ Contiene `aprendido.txt`, `config.toml` y los datos del programa: el índice, el
   - Doc cambiado → Word actualizado.
   - Doc renombrado o movido → el Word también.
   - Doc borrado → Word a la papelera.
+  - Las carpetas que se quedan vacías al mover o borrar un Word también se quitan (en OneDrive y, con la sincronización, en las copias).
+- **Para quitar un Word, borra su Doc**, no el Word: si borras solo el Word, el PC lo vuelve a poner en la siguiente pasada. El Word desaparece cuando el script de Google ha actualizado el `manifest.json` (hasta 15 minutos) y se sincroniza.
 - **Dónde se ve cada cosa:**
   - el Word de un Doc de la UPF va a OneDrive y H:, nunca a G:;
   - el de un Doc personal va a OneDrive (y a G: si está en la uni), nunca a H:.
